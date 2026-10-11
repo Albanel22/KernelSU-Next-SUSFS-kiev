@@ -153,12 +153,12 @@ extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
         content = content[:match.end()] + extern_decl + '\n' + content[match.end():]
         print("OK: extern setresuid placé après les includes")
 
-    # Trouver la signature exacte de __sys_setresuid (kernel 4.19)
-    sig_pattern = r'(static int __sys_setresuid\s*\([^)]*\)\s*\{)'
+    # Trouver la signature de __sys_setresuid (int ou long selon le kernel 4.19)
+    sig_pattern = r'((?:static\s+)?(?:int|long)\s+__sys_setresuid\s*\([^)]*\)\s*\{)'
     sig_match = re.search(sig_pattern, content)
 
     if not sig_match:
-        print("❌ __sys_setresuid introuvable avec le pattern static int")
+        print("❌ __sys_setresuid introuvable avec le pattern int/long")
         print("   Lignes contenant 'setresuid' :")
         for line in content.split('\n'):
             if 'setresuid' in line and '(' in line:
