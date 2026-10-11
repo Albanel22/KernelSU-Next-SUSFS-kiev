@@ -1,4 +1,4 @@
-name: Build kiev ReSukiSU SUSFS kernel
+name: Build ReSukiSU SUSFS Manual Hook kiev
 
 on:
   workflow_dispatch:
@@ -10,63 +10,26 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
-    env:
-      ROOT: ${{ github.workspace }}/work
-      KERNEL_DIR: ${{ github.workspace }}/work/kernel
-      SOURCE_URL: https://github.com/LineageOS/android_kernel_motorola_sm8250
-      RESUKISU_URL: https://github.com/ReSukiSU/ReSukiSU.git
-      RESUKISU_COMMIT: 90b4a4c70f70c835b01c2be6deac58ee3c0cb4c2
-      BOOT_URL: https://mirrorbits.lineageos.org/full/kiev/20260920/boot.img
-      DTBO_URL: https://mirrorbits.lineageos.org/full/kiev/20260920/dtbo.img
-      JOBS: '2'
     steps:
-      - name: Checkout build kit
+      - name: Checkout build script
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Run complete ReSukiSU + SUSFS build
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           set -euxo pipefail
-          # Neutralise le miroir Azure problématique
-          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
-            sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/apt-mirrors.txt 2>/dev/null || true
-            sudo sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          fi
-          sudo apt-get update \
-            -o Acquire::Retries=2 \
-            -o Acquire::http::Timeout=10 \
-            -o Acquire::https::Timeout=30
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc bison build-essential cpio flex gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi libelf-dev libssl-dev pahole python3 \
-            rsync wget curl git unzip zip
+          bash scripts/build.sh
 
-      - name: Build kernel + SUSFS + repack
-        run: |
-          set -euxo pipefail
-          WORKSPACE="$GITHUB_WORKSPACE" \
-          JOBS=2 \
-            bash build.sh
-
-      # ═══════════════════════════════════════════════════════════════
-      # UPLOAD : artefacts + FICHIERS SOURCE PATCHÉS pour analyse
-      # ═══════════════════════════════════════════════════════════════
-      - name: Upload artefacts et fichiers source patchés
+      - name: Upload generated artifacts
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: kiev-resukisu-susfs-${{ github.run_number }}
-          if-no-files-found: warn
+          name: resukisu-susfs-manual-hook-kiev-${{ github.run_number }}
+          if-no-files-found: error
           retention-days: 14
           path: |
-            output/
-            rej-analysis/
-            work/build.log
-            work/ksu-susfs.config
-            work/kernel/kernel/reboot.c
-            work/kernel/drivers/input/input.c
-            work/kernel/fs/namespace.c
-            work/kernel/fs/super.c
-            work/kernel/fs/proc/task_mmu.c
-            work/kernel/techpack/display/msm/msm_drv.c
-            work/kernel/out/.config
-            work/kernel/out/**/*.ko
+            output/ReSukiSU-SuSFS-boot.img
+            output/dtbo.img
+            output/build.log
+            output/ksud
+            kernel_sources/out/arch/arm64/boot/Image
