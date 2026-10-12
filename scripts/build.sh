@@ -290,6 +290,82 @@ if [ "$HOOKS_OK" -eq 0 ]; then
 fi
 echo "✅ Tous les hooks sont en place"
 
+# ==================== 3.3b. HOOKS SUSFS INLINE COMPLÉMENTAIRES ====================
+echo "=== Hooks SUSFS faccessat/stat/reboot ==="
+
+python3 << 'PYEOF_SUSFS_HOOKS'
+from pathlib import Path
+import re
+
+def after_includes(text, declaration):
+    if declaration.strip() in text:
+        return text
+    matches = list(re.finditer(r'^#include\s+[<"][^>"]+[>"]\s*$', text, re.MULTILINE))
+    if not matches:
+        return declaration + "\n" + text
+    pos = matches[-1].end()
+    return text[:pos] + "\n" + declaration + text[pos:]
+
+def patch_file(path, declaration, pattern, replacement, symbol, label):
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"{path} introuvable")
+    text = p.read_text()
+    already_patched = symbol in text
+    text = after_includes(text, declaration)
+    if not already_patched:
+        text, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+        if count != 1:
+            raise SystemExit(f"point d'insertion {label} introuvable dans {path}")
+    p.write_text(text)
+    print(f"OK: {label}")
+
+patch_file(
+    "fs/open.c",
+    """#ifdef CONFIG_KSU
+extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
+                                int *mode, int *flags);
+#endif
+""",
+    r'(SYSCALL_DEFINE3\(faccessat,[^\n]*\n\{)',
+    r'''\1
+#ifdef CONFIG_KSU
+	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+#endif''',
+    "ksu_handle_faccessat", "faccessat",
+)
+
+patch_file(
+    "fs/stat.c",
+    """#ifdef CONFIG_KSU
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+#endif
+""",
+    r'(vfs_statx\(int dfd, const char __user \*filename, int flags,\n\s*struct kstat \*stat, u32 request_mask\)\n\{)',
+    r'''\1
+#ifdef CONFIG_KSU
+	ksu_handle_stat(&dfd, &filename, &flags);
+#endif''',
+    "ksu_handle_stat", "stat",
+)
+
+patch_file(
+    "kernel/reboot.c",
+    """#ifdef CONFIG_KSU
+extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
+                                 void __user **arg);
+#endif
+""",
+    r'(\tint ret = 0;\n)',
+    r'''\1
+#ifdef CONFIG_KSU
+	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+#endif
+''',
+    "ksu_handle_sys_reboot", "sys_reboot",
+)
+PYEOF_SUSFS_HOOKS
+
 # ==================== 3.4. PATCH app_profile.c ====================
 echo "=== Patch compatibilité disable_seccomp() ==="
 
