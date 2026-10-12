@@ -34,11 +34,36 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION ReSukiSU via setup.sh officiel ====================
+# ==================== 2. INTÉGRATION SUSFS KERNEL-SIDE ====================
+echo "=== Intégration kernel-side SUSFS ==="
+INTEGRATION_DIR="$GITHUB_WORKSPACE/integration"
+KSU_COMMIT="5b76b884c75f729a220bb317aa4a4fc78f0e0e9c"
+
+for file in fs/sus_su.c fs/susfs.c include/linux/sus_su.h include/linux/susfs.h include/linux/susfs_def.h; do
+    cp "$INTEGRATION_DIR/$(basename "$file")" "$file"
+done
+
+git apply --reject --whitespace=nowarn "$INTEGRATION_DIR/kernel-adaptations.patch" || true
+if [ -f fs/Makefile.rej ]; then
+    grep -q 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile || \
+        sed -i '/^ifeq (\$(CONFIG_BLOCK),y)$/i obj-$(CONFIG_KSU_SUSFS) += susfs.o\nobj-$(CONFIG_KSU_SUSFS_SUS_SU) += sus_su.o\n' fs/Makefile
+    rm -f fs/Makefile.rej
+fi
+find . -type f \( -name '*.rej' -o -name '*.orig' \) -delete
+if find . -type f -name '*.rej' -print -quit | grep -q .; then
+    echo "❌ Hunks SUSFS rejetés non résolus"
+    exit 1
+fi
+grep -q 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
+test -s fs/susfs.c
+test -s include/linux/susfs.h
+echo "✅ Kernel-side SUSFS intégré"
+
+# ==================== 2b. INTÉGRATION ReSukiSU via setup.sh officiel ====================
 echo "=== Intégration ReSukiSU via setup.sh ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu || true
 
-curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s -- "$KSU_COMMIT"
 
 # Vérification de l'intégration
 KSU_KCONFIG_OK=0
