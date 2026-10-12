@@ -92,11 +92,8 @@ with open('fs/exec.c', 'r') as f:
 if 'ksu_execveat_hook' not in content:
     extern_decl = '''
 #ifdef CONFIG_KSU
-extern bool ksu_execveat_hook __read_mostly;
 extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
 				void *argv, void *envp, int *flags);
-extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
-				 void *argv, void *envp, int *flags);
 #endif
 '''
     # Placer la déclaration APRÈS le bloc d'includes
@@ -116,10 +113,7 @@ extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 		return PTR_ERR(filename);
 
 #ifdef CONFIG_KSU
-	if (unlikely(ksu_execveat_hook))
 		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-	else
-		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
 #endif'''
     if old_code in content:
         content = content.replace(old_code, new_code, 1)
@@ -165,7 +159,11 @@ extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
                 print("   >", line.strip()[:120])
         exit(1)
 
-    insert_pos = sig_match.end()
+    # Garder l’appel après le bloc de déclarations locales pour éviter
+    # -Wdeclaration-after-statement avec Clang.
+    decl_match = re.search(r'(^\s*kuid_t\s+kruid,\s+keuid,\s+ksuid;\s*\n)',
+                           content[sig_match.end():], re.MULTILINE)
+    insert_pos = sig_match.end() + decl_match.end() if decl_match else sig_match.end()
     insert_code = '''
 #ifdef CONFIG_KSU
 	(void)ksu_handle_setresuid(ruid, euid, suid);
@@ -227,7 +225,6 @@ with open('drivers/input/input.c', 'r') as f:
 if 'ksu_handle_input_handle_event' not in content:
     extern_decl = '''
 #ifdef CONFIG_KSU
-extern bool ksu_input_hook __read_mostly;
 extern __attribute__((cold)) int ksu_handle_input_handle_event(
 			unsigned int *type, unsigned int *code, int *value);
 #endif
@@ -248,10 +245,9 @@ extern __attribute__((cold)) int ksu_handle_input_handle_event(
 {
 	unsigned long flags;
 
-#ifdef CONFIG_KSU
-	if (unlikely(ksu_input_hook))
-		ksu_handle_input_handle_event(&type, &code, &value);
-#endif
+	#ifdef CONFIG_KSU
+	ksu_handle_input_handle_event(&type, &code, &value);
+	#endif
 
 	if (is_event_supported(type, dev->evbit, EV_MAX)) {'''
     if old_code in content:
