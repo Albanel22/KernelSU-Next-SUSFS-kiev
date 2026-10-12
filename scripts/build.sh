@@ -341,7 +341,7 @@ patch_file(
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
 #endif
 """,
-    r'(vfs_statx\(int dfd, const char __user \*filename, int flags,\n\s*struct kstat \*stat, u32 request_mask\)\n\{)',
+    r'(\tunsigned int lookup_flags = LOOKUP_FOLLOW \| LOOKUP_AUTOMOUNT;\n)',
     r'''\1
 #ifdef CONFIG_KSU
 	ksu_handle_stat(&dfd, &filename, &flags);
