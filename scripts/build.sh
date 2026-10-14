@@ -475,11 +475,9 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 {
   echo "CONFIG_KSU=y"
-  echo "CONFIG_KSU_MANUAL_HOOK=y"
+  echo "# CONFIG_KSU_MANUAL_HOOK is not set"
   echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
-  echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y"
-  echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y"
-  echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y"
+  echo "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y"
   echo "# CONFIG_KPROBES is not set"
   echo "CONFIG_COMPAT=y"
   echo "CONFIG_COMPAT_32BIT_TIME=y"
@@ -502,21 +500,26 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig
 
-echo "=== Forçage de CONFIG_KSU_MANUAL_HOOK et désactivation KPROBES ==="
-if grep -q "# CONFIG_KSU_MANUAL_HOOK is not set" out/.config; then
-    sed -i 's/# CONFIG_KSU_MANUAL_HOOK is not set/CONFIG_KSU_MANUAL_HOOK=y/' out/.config
+echo "=== Validation du mode SUSFS manager et désactivation KPROBES ==="
+if ! grep -q '^CONFIG_KSU_SUSFS=y$' out/.config; then
+    echo "❌ CONFIG_KSU_SUSFS n’est pas activé dans la configuration finale"
+    exit 1
 fi
-if ! grep -q "CONFIG_KSU_MANUAL_HOOK" out/.config; then
-    echo "CONFIG_KSU_MANUAL_HOOK=y" >> out/.config
+if grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config; then
+    echo "❌ Modes KSU_MANUAL_HOOK et KSU_SUSFS actifs simultanément"
+    exit 1
 fi
-
+if ! grep -q '^CONFIG_KSU_MULTI_MANAGER_SUPPORT=y$' out/.config; then
+    echo "❌ Support multi-manager absent de la configuration finale"
+    exit 1
+fi
 if grep -q "^CONFIG_KPROBES=y" out/.config; then
     echo "⚠️  KPROBES réactivé par olddefconfig, désactivation forcée..."
     sed -i 's/^CONFIG_KPROBES=y/# CONFIG_KPROBES is not set/' out/.config
 fi
 
 echo "=== État final .config ==="
-grep -E "KSU_MANUAL_HOOK|KPROBES" out/.config || true
+grep -E "KSU_(SUSFS|MANUAL_HOOK|MULTI_MANAGER_SUPPORT)|KPROBES" out/.config || true
 
 # ==================== 4b. BYPASS SECCOMP CIBLÉ ====================
 echo "=== Patch bypass seccomp ciblé dans kernel/seccomp.c ==="
@@ -594,8 +597,8 @@ else
   exit 1
 fi
 
-# ==================== 6b. COMPILATION KSUD (ReSukiSU) ====================
-echo "=== Compilation de ksud (ReSukiSU) ==="
+# ==================== 6b. COMPILATION KSUD (même commit que le noyau) ====================
+echo "=== Compilation de ksud (BakaSU $KSU_COMMIT) ==="
 cd "$GITHUB_WORKSPACE"
 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -616,7 +619,10 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src"
-git clone --depth=1 https://github.com/ReSukiSU/ReSukiSU.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 https://github.com/Baka-SU/BakaSU.git "$GITHUB_WORKSPACE/ksud-src"
+git -C "$GITHUB_WORKSPACE/ksud-src" fetch --depth=1 origin "$KSU_COMMIT"
+git -C "$GITHUB_WORKSPACE/ksud-src" checkout --detach "$KSU_COMMIT"
+test "$(git -C "$GITHUB_WORKSPACE/ksud-src" rev-parse HEAD)" = "$KSU_COMMIT"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 
 mkdir -p .cargo
@@ -709,6 +715,6 @@ cp kernel_sources/build.log output/ 2>/dev/null || true
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 
 echo "=== BUILD TERMINÉ ==="
-echo "Noyau + ksud : ReSukiSU (main, mode non-GKI)"
+echo "Noyau + ksud : BakaSU/SUSFS ($KSU_COMMIT, mode non-GKI)"
 echo "Images stock : Google Drive (build 2026-09-20)"
 ls -lh output/
