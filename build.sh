@@ -4,7 +4,7 @@
 # Appareil : Motorola One 5G Ace (kiev / lito)
 # Kernel   : 4.19.325
 # Source   : LineageOS/android_kernel_motorola_sm8250 (branche par défaut, sans commit fixe)
-# ReSukiSU : ReSukiSU/ReSukiSU @ 90b4a4c7
+# Driver manager : BakaSU/ReSukiSU @ 5b76b884 (compatible Manager 35222)
 # Hooks    : KSU_SUSFS (SUSFS Inline Hook)
 # SUSFS    : patch JackA1ltman + corrections Python intégrées
 # =============================================================================
@@ -25,8 +25,8 @@ CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 
 # ─── Sources et versions ────────────────────────────────────────────────
 SOURCE_URL="https://github.com/LineageOS/android_kernel_motorola_sm8250"
-RESUKISU_URL="https://github.com/ReSukiSU/ReSukiSU.git"
-RESUKISU_COMMIT="90b4a4c70f70c835b01c2be6deac58ee3c0cb4c2"
+RESUKISU_URL="https://github.com/Baka-SU/BakaSU.git"
+RESUKISU_COMMIT="5b76b884c75f729a220bb317aa4a4fc78f0e0e9c"
 JACKA1LTMAN_RAW="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/main"
 SUSFS_PATCH_URL="$JACKA1LTMAN_RAW/Patches/Patch/susfs_patch_to_4.19.patch"
 INLINE_HOOK_URL="$JACKA1LTMAN_RAW/Patches/susfs_inline_hook_patches.sh"
@@ -166,9 +166,32 @@ git -C "$RESUKISU_DIR" fetch --depth=1 origin "$RESUKISU_COMMIT"
 git -C "$RESUKISU_DIR" checkout --detach "$RESUKISU_COMMIT"
 git -C "$RESUKISU_DIR" log --oneline -1
 
+test "$(git -C "$RESUKISU_DIR" rev-parse HEAD)" = "$RESUKISU_COMMIT" || {
+  echo "❌ Révision driver manager inattendue" >&2
+  exit 1
+}
+
 rm -rf "$KERNEL_DIR/KernelSU" "$KERNEL_DIR/drivers/kernelsu"
 cp -a "$RESUKISU_DIR" "$KERNEL_DIR/KernelSU"
 ln -s ../KernelSU/kernel "$KERNEL_DIR/drivers/kernelsu"
+
+# Contrôles explicites des composants nécessaires à la communication manager.
+for f in \
+  kernel/Kbuild \
+  kernel/include/uapi/supercall.h \
+  kernel/supercall/dispatch.c \
+  kernel/manager/manager.c \
+  kernel/runtime/ksud_integration.c; do
+  [[ -f "$KERNEL_DIR/KernelSU/$f" ]] || {
+    echo "❌ Composant driver manager absent : KernelSU/$f" >&2
+    exit 1
+  }
+done
+grep -q 'supercall/dispatch.o' "$KERNEL_DIR/KernelSU/kernel/Kbuild" || {
+  echo "❌ Supercall UAPI non inclus dans Kbuild" >&2
+  exit 1
+}
+echo "✅ Driver manager intégré : $RESUKISU_COMMIT"
 
 # Intégration Kconfig ReSukiSU dans le kernel
 echo "→ Intégration Kconfig ReSukiSU..."

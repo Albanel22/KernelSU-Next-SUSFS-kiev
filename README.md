@@ -21,19 +21,19 @@ Le workflow est lancé automatiquement lorsqu’un de ces fichiers change, ou ma
 | Élément | Valeur |
 |---|---|
 | Kernel | `LineageOS/android_kernel_motorola_sm8250` — branche par défaut, sans commit fixe |
-| ReSukiSU | `90b4a4c70f70c835b01c2be6deac58ee3c0cb4c2` |
+| Driver manager BakaSU/ReSukiSU | `5b76b884c75f729a220bb317aa4a4fc78f0e0e9c` |
 | Image boot de référence | `https://mirrorbits.lineageos.org/full/kiev/20260920/boot.img` |
 | Image dtbo de référence | `https://mirrorbits.lineageos.org/full/kiev/20260920/dtbo.img` |
 | Defconfig | `vendor/lito-perf_defconfig` |
 | Architecture | `arm64` |
 
-Les URLs et la révision ReSukiSU sont visibles dans le workflow et le journal de build. La révision du noyau suit volontairement la branche par défaut du dépôt LineageOS, sans commit fixe.
+La révision du driver manager est alignée sur l’APK `BakaSU_v4.2.0-rc3_35222-arm64-v8a-release.apk`, qui utilise le même commit. La révision du noyau suit volontairement la branche par défaut du dépôt LineageOS, sans commit fixe.
 
 `manual-integrate.md` conserve les modèles de hooks manuels ReSukiSU. Pour un kernel non-GKI, ces hooks doivent être vérifiés et adaptés à la version exacte du code source ; leur absence peut faire échouer la compilation. SUSFS sur non-GKI est un backport spécifique, et non une compatibilité universelle garantie.
 
 ## Choix Kconfig ReSukiSU
 
-La révision ReSukiSU `90b4a4c70f70c835b01c2be6deac58ee3c0cb4c2` place `KSU_TRACEPOINT_HOOK`, `KSU_MANUAL_HOOK` et `KSU_SUSFS` dans un choix exclusif. Les adaptations de `Branche-B` utilisent les hooks protégés par `CONFIG_KSU_SUSFS`; le build sélectionne donc exclusivement `CONFIG_KSU_SUSFS=y` et force `CONFIG_KSU_MANUAL_HOOK` ainsi que `CONFIG_KSU_TRACEPOINT_HOOK` à `n`. Les options `KSU_MANUAL_HOOK_AUTO_*` restent désactivées car elles dépendent du mode Manual Hook.
+La révision `5b76b884c75f729a220bb317aa4a4fc78f0e0e9c` place `KSU_TRACEPOINT_HOOK`, `KSU_MANUAL_HOOK` et `KSU_SUSFS` dans un choix exclusif. Les adaptations de `Branche-B` utilisent les hooks protégés par `CONFIG_KSU_SUSFS`; le build sélectionne donc exclusivement `CONFIG_KSU_SUSFS=y` et force `CONFIG_KSU_MANUAL_HOOK` ainsi que `CONFIG_KSU_TRACEPOINT_HOOK` à `n`. Les options `KSU_MANUAL_HOOK_AUTO_*` restent désactivées car elles dépendent du mode Manual Hook.
 
 ## Patch tactile
 

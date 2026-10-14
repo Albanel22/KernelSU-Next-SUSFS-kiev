@@ -6,8 +6,8 @@ KERNEL_DIR="${KERNEL_DIR:-$ROOT/kernel}"
 BUNDLE_DIR="${BUNDLE_DIR:-$ROOT}"
 
 # ─── Versions figées ────────────────────────────────────────────────────
-RESUKISU_URL="https://github.com/ReSukiSU/ReSukiSU.git"
-RESUKISU_COMMIT="90b4a4c70f70c835b01c2be6deac58ee3c0cb4c2"
+RESUKISU_URL="https://github.com/Baka-SU/BakaSU.git"
+RESUKISU_COMMIT="5b76b884c75f729a220bb317aa4a4fc78f0e0e9c"
 
 # ─── Sources SUSFS JackA1ltman (NonGKI_Kernel_Build_2nd) ────────────────
 JACKA1LTMAN_RAW="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/main"
@@ -27,9 +27,25 @@ fi
 git -C "$ROOT/ReSukiSU" fetch --depth=1 origin "$RESUKISU_COMMIT"
 git -C "$ROOT/ReSukiSU" checkout --detach "$RESUKISU_COMMIT"
 
+test "$(git -C "$ROOT/ReSukiSU" rev-parse HEAD)" = "$RESUKISU_COMMIT" || {
+  echo "❌ Révision driver manager inattendue" >&2
+  exit 1
+}
+
 # Intégration ReSukiSU dans le kernel source
 cp -a "$ROOT/ReSukiSU" "$KERNEL_DIR/KernelSU"
 ln -s ../KernelSU/kernel "$KERNEL_DIR/drivers/kernelsu"
+
+for f in kernel/Kbuild kernel/include/uapi/supercall.h kernel/supercall/dispatch.c kernel/manager/manager.c kernel/runtime/ksud_integration.c; do
+  [[ -f "$KERNEL_DIR/KernelSU/$f" ]] || {
+    echo "❌ Composant driver manager absent : KernelSU/$f" >&2
+    exit 1
+  }
+done
+grep -q 'supercall/dispatch.o' "$KERNEL_DIR/KernelSU/kernel/Kbuild" || {
+  echo "❌ Supercall UAPI non inclus dans Kbuild" >&2
+  exit 1
+}
 
 # =====================================================================
 # 2. INTÉGRATION SUSFS JackA1ltman
