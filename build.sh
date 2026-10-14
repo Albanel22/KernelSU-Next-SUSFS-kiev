@@ -498,45 +498,17 @@ done
 
 grep -E 'CONFIG_(KSU|KSU_SUSFS|KSU_MANUAL_HOOK|THREAD_INFO_IN_TASK)' "$OUT/.config" | tee "$ROOT/ksu-susfs.config"
 
-# =====================================================================
-# 6. PATCH SIGNATURES MODULE
-# =====================================================================
+# ==================== 5b. PATCHS MOTOROLA ====================
+echo ""
+echo "=== Patch signatures modules + tactile ==="
+
+echo "Patch signatures modules..."
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
 
-# =====================================================================
-# 7. PATCH TACTILE
-# =====================================================================
-echo "=== Patch tactile ==="
-if [ -f "techpack/display/msm/msm_drv.c" ]; then
-    if ! grep -q "panel_register_notifier" techpack/display/msm/msm_drv.c; then
-        cat >> techpack/display/msm/msm_drv.c <<'TOUCH_PATCH'
+echo "Patch tactile..."
+printf "\n/* --- Début Patch Tactile --- */\n#include <linux/notifier.h>\n#include <linux/module.h>\nstatic BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);\nint panel_register_notifier(struct notifier_block *nb) {\n    return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb);\n}\nEXPORT_SYMBOL(panel_register_notifier);\nint panel_unregister_notifier(struct notifier_block *nb) {\n    return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb);\n}\nEXPORT_SYMBOL(panel_unregister_notifier);\nvoid touch_set_state(int state) { return; }\nEXPORT_SYMBOL(touch_set_state);\n/* --- Fin Patch Tactile --- */\n" >> techpack/display/msm/msm_drv.c
 
-/* --- Début Patch Tactile --- */
-#include <linux/notifier.h>
-#include <linux/module.h>
-static BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);
-int panel_register_notifier(struct notifier_block *nb) {
-    return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb);
-}
-EXPORT_SYMBOL(panel_register_notifier);
-int panel_unregister_notifier(struct notifier_block *nb) {
-    return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb);
-}
-EXPORT_SYMBOL(panel_unregister_notifier);
-void touch_set_state(int state) { return; }
-EXPORT_SYMBOL(touch_set_state);
-/* --- Fin Patch Tactile --- */
-TOUCH_PATCH
-        echo "✅ Patch tactile appliqué"
-    else
-        echo "✅ Patch tactile déjà présent"
-    fi
-else
-    echo "❌ techpack/display/msm/msm_drv.c introuvable" >&2
-    exit 1
-fi
-grep -q "panel_register_notifier" techpack/display/msm/msm_drv.c
-grep -q "touch_set_state" techpack/display/msm/msm_drv.c
+echo "✅ Patches Motorola appliqués"
 
 # =====================================================================
 # 7b. FIX BUGS KERNEL LINEAGEOS
