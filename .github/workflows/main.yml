@@ -1,27 +1,76 @@
-name: Build kiev ReSukiSU SUSFS (fork tactile)
+name: Build ReSukiSU (AutoPatch)
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
+    inputs:
+      do_build_ksud:
+        description: 'Construire ksud (Rust + NDK) — lent'
+        required: false
+        default: 'false'
+      do_repack:
+        description: 'Repacker boot.img via magiskboot'
+        required: false
+        default: 'true'
+      skip_resukisu:
+        description: 'Ne pas exécuter l\'intégration ReSukiSU (setup.sh)'
+        required: false
+        default: 'false'
+      skip_deps:
+        description: 'Ne pas installer les paquets apt (utile si runners déjà préparés)'
+        required: false
+        default: 'false'
+      jobs:
+        description: 'Nombre de jobs make (-j). Par défaut nproc'
+        required: false
+        default: ''
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Build kernel
-        run: |
-          WORKSPACE="$GITHUB_WORKSPACE" JOBS=2 bash build.sh
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          name: kiev-resukisu-susfs-tactile-${{ github.run_number }}
-          if-no-files-found: warn
-          retention-days: 14
+          fetch-depth: 0
+
+      - name: Add pip --user bin to PATH
+        run: echo "${HOME}/.local/bin" >> $GITHUB_PATH
+
+      - name: Make build script executable
+        run: |
+          if [ -f ./build_all_autopatch.sh ]; then
+            chmod +x ./build_all_autopatch.sh
+          else
+            echo "ERREUR: build_all_autopatch.sh introuvable à la racine du repo" >&2
+            exit 1
+          fi
+
+      - name: Run full build script
+        # always try to run; the script contains its own flags to skip heavy parts
+        run: |
+          set -x
+          # pass inputs as env vars to the script
+          export DO_BUILD_KSUD="${{ github.event.inputs.do_build_ksud }}"
+          export DO_REPACK="${{ github.event.inputs.do_repack }}"
+          export SKIP_RESUKISU="${{ github.event.inputs.skip_resukisu }}"
+          export SKIP_DEPS="${{ github.event.inputs.skip_deps }}"
+          if [ -n "${{ github.event.inputs.jobs }}" ]; then
+            export JOBS="${{ github.event.inputs.jobs }}"
+          fi
+          ./build_all_autopatch.sh
+        env:
+          # ensure PATH contains local pip installs
+          PATH: ${{ env.PATH }}:${HOME}/.local/bin
+
+      - name: Upload build artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReSukiSU-artifacts
           path: |
-            output/
-            rej-analysis/
-            work/build.log
+            output/**
+            work/logs/**
+            work/**
+            kernel/out/arch/arm64/boot/**
