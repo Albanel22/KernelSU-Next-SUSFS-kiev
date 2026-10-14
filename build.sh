@@ -30,13 +30,37 @@ RESUKISU_COMMIT="5b76b884c75f729a220bb317aa4a4fc78f0e0e9c"
 JACKA1LTMAN_RAW="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/main"
 SUSFS_PATCH_URL="$JACKA1LTMAN_RAW/Patches/Patch/susfs_patch_to_4.19.patch"
 INLINE_HOOK_URL="$JACKA1LTMAN_RAW/Patches/susfs_inline_hook_patches.sh"
-BOOT_URL="https://mirrorbits.lineageos.org/full/kiev/20260920/boot.img"
-DTBO_URL="https://mirrorbits.lineageos.org/full/kiev/20260920/dtbo.img"
+BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
+DTBO_GDRIVE_ID="11451aa0CCzyVtNTYOK2n6oH6E0PT-2NX"
 
 # ─── Sortie ─────────────────────────────────────────────────────────────
 OUTPUT_BOOT="$OUTPUT_DIR/boot-resukisu-susfs-kiev-tactile.img"
 
 mkdir -p "$ROOT" "$REFERENCE_DIR" "$OUTPUT_DIR"
+
+download_gdrive_image() {
+  local file_id="$1"
+  local output="$2"
+  local label="$3"
+  local tmp
+  tmp="$(mktemp "${output}.tmp.XXXXXX")"
+  trap 'rm -f "$tmp"' RETURN
+
+  echo "→ Téléchargement Google Drive : $label"
+  curl --fail --location --silent --show-error --retry 3 --retry-delay 2 \
+    --connect-timeout 20 --max-time 3600 -A "Mozilla/5.0" \
+    "https://drive.usercontent.google.com/download?id=${file_id}&export=download&confirm=t" \
+    --output "$tmp"
+
+  if grep -aEq '<html|<!DOCTYPE|Google Drive|Sign in' "$tmp"; then
+    echo "❌ Google Drive a renvoyé une page HTML pour $label" >&2
+    echo "   Vérifier le partage : Toute personne disposant du lien" >&2
+    return 1
+  fi
+  [[ -s "$tmp" ]] || { echo "❌ Fichier vide : $label" >&2; return 1; }
+  mv -f "$tmp" "$output"
+  trap - RETURN
+}
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "=== BUILD ReSukiSU + SUSFS (fork tactile Albanel22) ==="
@@ -550,10 +574,10 @@ echo ""
 echo "=== Téléchargement boot.img / dtbo.img de référence ==="
 cd "$ROOT"
 if [[ ! -f "$REFERENCE_DIR/boot.img" ]]; then
-  wget --retry-connrefused --tries=5 -O "$REFERENCE_DIR/boot.img" "$BOOT_URL"
+  download_gdrive_image "$BOOT_GDRIVE_ID" "$REFERENCE_DIR/boot.img" "boot.img"
 fi
 if [[ ! -f "$REFERENCE_DIR/dtbo.img" ]]; then
-  wget --retry-connrefused --tries=5 -O "$REFERENCE_DIR/dtbo.img" "$DTBO_URL"
+  download_gdrive_image "$DTBO_GDRIVE_ID" "$REFERENCE_DIR/dtbo.img" "dtbo.img"
 fi
 sha256sum "$REFERENCE_DIR/boot.img" "$REFERENCE_DIR/dtbo.img"
 

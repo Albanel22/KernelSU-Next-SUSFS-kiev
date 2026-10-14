@@ -22,8 +22,8 @@ Le workflow est lancé automatiquement lorsqu’un de ces fichiers change, ou ma
 |---|---|
 | Kernel | `LineageOS/android_kernel_motorola_sm8250` — branche par défaut, sans commit fixe |
 | Driver manager BakaSU/ReSukiSU | `5b76b884c75f729a220bb317aa4a4fc78f0e0e9c` |
-| Image boot de référence | `https://mirrorbits.lineageos.org/full/kiev/20260920/boot.img` |
-| Image dtbo de référence | `https://mirrorbits.lineageos.org/full/kiev/20260920/dtbo.img` |
+| Image boot de référence | Google Drive ID `1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis` |
+| Image dtbo de référence | Google Drive ID `11451aa0CCzyVtNTYOK2n6oH6E0PT-2NX` |
 | Defconfig | `vendor/lito-perf_defconfig` |
 | Architecture | `arm64` |
 
