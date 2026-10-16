@@ -164,6 +164,7 @@ extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
             raise SystemExit('❌ fs/namespace.c: ancre internal.h absente')
         content = content.replace(marker, marker + '\n' + ns_decl, 1)
         print('✅ Déclarations SUSFS ajoutées à fs/namespace.c')
+        open(ns_path, 'w').write(content)
     if 'susfs_alloc_non_unshare_ksu_vfsmnt(' not in content:
         old = '''\tmnt = alloc_vfsmnt(fc->source ?: \"none\");
 \tif (!mnt)
