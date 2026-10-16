@@ -148,6 +148,67 @@ for fpath in ["fs/namespace.c", "fs/stat.c"]:
                         print(f"✅ Header ajouté à {fpath}")
                         break
 
+# 3b. Réparation manuelle des deux hunks namespace.c rejetés.
+ns_path = "fs/namespace.c"
+if os.path.exists(ns_path):
+    content = open(ns_path).read()
+    ns_decl = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+#define CL_COPY_MNT_NS BIT(25)
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+'''
+    if 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;' not in content:
+        marker = '#include "internal.h"'
+        if marker not in content:
+            raise SystemExit('❌ fs/namespace.c: ancre internal.h absente')
+        content = content.replace(marker, marker + '\n' + ns_decl, 1)
+        print('✅ Déclarations SUSFS ajoutées à fs/namespace.c')
+    if 'susfs_alloc_non_unshare_ksu_vfsmnt(' not in content:
+        old = '''\tmnt = alloc_vfsmnt(fc->source ?: \"none\");
+\tif (!mnt)
+'''
+        new = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted) &&
+\t\tsusfs_is_current_ksu_domain()) {
+\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(fc->source ?: "none");
+\t\tgoto bypass_orig_flow;
+\t}
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+\tmnt = alloc_vfsmnt(fc->source ?: "none");
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+bypass_orig_flow:
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+'''
+        if old not in content:
+            raise SystemExit('❌ fs/namespace.c: bloc vfs_kern_mount introuvable')
+        content = content.replace(old, new, 1)
+        open(ns_path, 'w').write(content)
+        print('✅ Hunk vfs_kern_mount réparé dans fs/namespace.c')
+
+# 3c. Réparation manuelle du hunk SUS_MAP rejeté dans task_mmu.c.
+mmu_path = "fs/proc/task_mmu.c"
+if os.path.exists(mmu_path):
+    content = open(mmu_path).read()
+    if 'SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))' not in content:
+        old = '''\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);
+\t\tmmap_read_unlock(mm);'''
+        new = '''#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+\t\tvma = find_vma(mm, start_vaddr);
+\t\tif (vma && vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+\t\t\tgoto bypass_orig_flow;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+bypass_orig_flow:
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+\t\tmmap_read_unlock(mm);'''
+        if old not in content:
+            raise SystemExit('❌ task_mmu.c: bloc walk_page_range introuvable')
+        content = content.replace(old, new, 1)
+        open(mmu_path, 'w').write(content)
+        print('✅ Hunk SUS_MAP réparé dans task_mmu.c')
+
 # 4. Hook execve compatible avec le contrôle BakaSU/compat.
 exec_path = "fs/exec.c"
 if os.path.exists(exec_path):
@@ -189,8 +250,15 @@ rejects = []
 for root, _, names in os.walk('.'):
     rejects.extend(os.path.join(root, n) for n in names if n.endswith('.rej'))
 if rejects:
-    bad = [p for p in rejects if p != './fs/super.c.rej']
-    if bad or 'susfs_is_sdcard_android_data_not_decrypted' not in open('fs/super.c').read():
+    allowed = {'./fs/super.c.rej', './fs/namespace.c.rej', './fs/proc/task_mmu.c.rej'}
+    bad = [p for p in rejects if p not in allowed]
+    required = [
+        ('fs/super.c', 'susfs_is_sdcard_android_data_not_decrypted'),
+        ('fs/namespace.c', 'susfs_alloc_non_unshare_ksu_vfsmnt'),
+        ('fs/proc/task_mmu.c', 'SUSFS_IS_INODE_SUS_MAP'),
+    ]
+    unresolved = [path for path, marker in required if marker not in open(path).read()]
+    if bad or unresolved:
         raise SystemExit('❌ Rejets SUSFS non résolus: ' + ', '.join(rejects))
     for p in rejects:
         os.remove(p)
