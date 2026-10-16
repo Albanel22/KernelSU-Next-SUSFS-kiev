@@ -7,6 +7,7 @@
 # ReSukiSU : ReSukiSU/ReSukiSU @ 90b4a4c7
 # Hooks    : KSU_SUSFS (SUSFS Inline Hook) SANS input.c (préserve les CRC tactiles)
 # SUSFS    : patch JackA1ltman + corrections Python intégrées
+# Images   : Google Drive (boot.img + dtbo.img)
 # =============================================================================
 set -Eeuo pipefail
 
@@ -31,8 +32,10 @@ RESUKISU_COMMIT="90b4a4c70f70c835b01c2be6deac58ee3c0cb4c2"
 JACKA1LTMAN_RAW="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/main"
 SUSFS_PATCH_URL="$JACKA1LTMAN_RAW/Patches/Patch/susfs_patch_to_4.19.patch"
 INLINE_HOOK_URL="$JACKA1LTMAN_RAW/Patches/susfs_inline_hook_patches.sh"
-BOOT_URL="https://mirrorbits.lineageos.org/full/kiev/20260920/boot.img"
-DTBO_URL="https://mirrorbits.lineageos.org/full/kiev/20260920/dtbo.img"
+
+# ─── IDs Google Drive des images stock (build 2026-09-20) ───────────────
+BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
+DTBO_GDRIVE_ID="11451aa0CCzyVtNTYOK2n6oH6E0PT-2NX"
 
 # ─── Sortie ─────────────────────────────────────────────────────────────
 OUTPUT_BOOT="$OUTPUT_DIR/boot-resukisu-susfs-kiev.img"
@@ -66,7 +69,10 @@ if command -v apt-get >/dev/null 2>&1 && [[ "${SKIP_APT:-0}" != "1" ]]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
     bc bison build-essential cpio flex gcc-aarch64-linux-gnu \
     gcc-arm-linux-gnueabi libelf-dev libssl-dev pahole python3 \
-    rsync wget curl git unzip zip
+    python3-pip rsync wget curl git unzip zip
+
+  echo "→ Installation de gdown pour Google Drive..."
+  pip3 install --quiet gdown 2>/dev/null || python3 -m pip install --quiet gdown
 
   echo "✅ Dépendances installées"
 fi
@@ -349,8 +355,6 @@ cp /tmp/susfs_inline_hook_patches.sh /tmp/susfs_inline_hook_patches.sh.orig
 
 echo "→ Exclusion de drivers/input/input.c du script (préserve les CRC tactiles)..."
 
-# Commenter toutes les lignes qui touchent à input.c
-# On identifie les lignes qui contiennent "input.c" ou "input/input"
 python3 << 'PYEOF_INLINE_EXCLUDE'
 from pathlib import Path
 import re
@@ -363,9 +367,7 @@ new_lines = []
 excluded_count = 0
 
 for line in lines:
-    # Détecter les lignes qui patchent input.c
     if re.search(r'input\.c|input/input|input_handle_event|ksu_handle_input', line, re.IGNORECASE):
-        # Commenter la ligne
         if not line.strip().startswith('#'):
             new_lines.append(f"# [KIEV-FIX-TACTILE] {line}")
             excluded_count += 1
@@ -375,8 +377,6 @@ for line in lines:
 script.write_text('\n'.join(new_lines))
 print(f"✅ {excluded_count} ligne(s) relative(s) à input.c commentée(s)")
 print("   → Le script SUSFS ne touchera PAS à drivers/input/input.c")
-print("   → Les CRC des symboles input_* restent intacts")
-print("   → Les modules tactiles externes pourront charger")
 PYEOF_INLINE_EXCLUDE
 
 # Vérification
@@ -405,7 +405,6 @@ from pathlib import Path
 input_c = Path("drivers/input/input.c")
 text = input_c.read_text()
 
-# Supprimer le bloc hook SUSFS
 patterns = [
     r'#ifdef CONFIG_KSU_SUSFS\n\tif \(static_branch_unlikely\(&ksu_is_input_hook_enabled\)\)\n\t\tksu_handle_input_handle_event\(&type, &code, &value\);\n#endif\n',
     r'#ifdef CONFIG_KSU\n.*?ksu_handle_input_handle_event.*?#endif\n',
@@ -447,7 +446,6 @@ grep -q 'susfs_is_sdcard_android_data_not_decrypted' "$KERNEL_DIR/fs/super.c" ||
 grep -q 'SUSFS_IS_INODE_SUS_MAP' "$KERNEL_DIR/fs/proc/task_mmu.c" || {
   echo "❌ task_mmu.c : bloc SUS_MAP manquant"; exit 1; }
 
-# Vérification critique : input.c NE DOIT PAS contenir de hook SUSFS
 if grep -q "ksu_handle_input_handle_event" "$KERNEL_DIR/drivers/input/input.c" 2>/dev/null; then
   echo "❌ CRITIQUE : input.c contient encore un hook SUSFS !"
   echo "   → Les modules tactiles ne chargeront PAS"
@@ -575,18 +573,42 @@ sha256sum "$OUT/arch/arm64/boot/Image.gz"
 printf '%s\n' '✅ Compilation ReSukiSU/SUSFS réussie'
 
 # =====================================================================
-# 9. TÉLÉCHARGEMENT DES IMAGES DE RÉFÉRENCE
+# 9. TÉLÉCHARGEMENT DES IMAGES DE RÉFÉRENCE (Google Drive)
 # =====================================================================
 echo ""
-echo "=== Téléchargement boot.img / dtbo.img de référence ==="
+echo "=== Téléchargement boot.img / dtbo.img depuis Google Drive ==="
 cd "$ROOT"
+
 if [[ ! -f "$REFERENCE_DIR/boot.img" ]]; then
-  wget --retry-connrefused --tries=5 -O "$REFERENCE_DIR/boot.img" "$BOOT_URL"
+  echo "→ Téléchargement boot.img (Google Drive ID: $BOOT_GDRIVE_ID)..."
+  gdown "https://drive.google.com/uc?id=${BOOT_GDRIVE_ID}" -O "$REFERENCE_DIR/boot.img" || {
+    echo "❌ Échec téléchargement boot.img depuis Google Drive"
+    echo "   Vérifie que le fichier est partagé en 'Tous les utilisateurs disposant du lien'"
+    exit 1
+  }
 fi
+
 if [[ ! -f "$REFERENCE_DIR/dtbo.img" ]]; then
-  wget --retry-connrefused --tries=5 -O "$REFERENCE_DIR/dtbo.img" "$DTBO_URL"
+  echo "→ Téléchargement dtbo.img (Google Drive ID: $DTBO_GDRIVE_ID)..."
+  gdown "https://drive.google.com/uc?id=${DTBO_GDRIVE_ID}" -O "$REFERENCE_DIR/dtbo.img" || {
+    echo "⚠️  Échec téléchargement dtbo.img (non bloquant)"
+  }
 fi
-sha256sum "$REFERENCE_DIR/boot.img" "$REFERENCE_DIR/dtbo.img"
+
+# Vérification de taille (boot.img doit faire ~96 Mo)
+if [[ -f "$REFERENCE_DIR/boot.img" ]]; then
+  BOOT_REF_SIZE=$(stat -c%s "$REFERENCE_DIR/boot.img")
+  BOOT_REF_MB=$((BOOT_REF_SIZE / 1024 / 1024))
+  echo "→ boot.img référence : $BOOT_REF_MB Mo"
+  if [ "$BOOT_REF_MB" -lt 50 ]; then
+    echo "❌ boot.img de référence trop petit ($BOOT_REF_MB Mo < 50 Mo)"
+    echo "   → Vérifie que le fichier Google Drive est bien le boot.img complet"
+    exit 1
+  fi
+fi
+
+sha256sum "$REFERENCE_DIR/boot.img" 2>/dev/null || true
+sha256sum "$REFERENCE_DIR/dtbo.img" 2>/dev/null || true
 
 # =====================================================================
 # 10. REPACK DU BOOT.IMG (Python embarqué)
@@ -647,110 +669,4 @@ def make_ramdisk(tmp):
     with old_cpio.open("rb") as inp:
         run(["cpio", "-idmuv"], cwd=ramdisk_dir, stdin=inp)
 
-    modules = sorted(MODULE_ROOT.rglob("*.ko"))
-    if not modules:
-        raise SystemExit("No kernel modules found")
-    module_dir = ramdisk_dir / "lib" / "modules" / MODULE_RELEASE
-    module_dir.mkdir(parents=True, exist_ok=True)
-    manifest = []
-    for module in modules:
-        rel = module.relative_to(MODULE_ROOT)
-        dest = module_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(module, dest)
-        manifest.append(str(Path("lib/modules") / MODULE_RELEASE / rel))
-    (module_dir / "modules.order").write_text("\n".join(manifest) + "\n")
-    (module_dir / "modules.load").write_text("\n".join(manifest) + "\n")
-
-    new_cpio = Path(tmp) / "ramdisk.new.cpio"
-    new_gz = Path(tmp) / "ramdisk.new.gz"
-    find_proc = subprocess.Popen(["find", ".", "-print0"], cwd=ramdisk_dir,
-                                  stdout=subprocess.PIPE)
-    with new_cpio.open("wb") as out:
-        run(["cpio", "--null", "-o", "-H", "newc"], cwd=ramdisk_dir,
-            stdin=find_proc.stdout, stdout=out)
-    find_proc.wait()
-    with new_gz.open("wb") as out:
-        run(["gzip", "-9", "-c", str(new_cpio)], stdout=out)
-    return new_gz.read_bytes(), len(modules), sum(x.stat().st_size for x in modules)
-
-
-def main():
-    if not REFERENCE.is_file() or not KERNEL.is_file():
-        raise SystemExit("Reference boot.img or compiled Image.gz is missing")
-    original = REFERENCE.read_bytes()
-    if original[:8] != b"ANDROID!":
-        raise SystemExit("Reference is not an Android boot image")
-    original_kernel_size = u32(original, 8)
-    original_ramdisk_size = u32(original, 16)
-    original_second_size = u32(original, 24)
-    page = u32(original, 36) or PAGE_SIZE
-    if page != PAGE_SIZE:
-        raise SystemExit(f"Unsupported page size: {page}")
-    old_kernel_off = page
-    old_ramdisk_off = old_kernel_off + align(original_kernel_size, page)
-    old_second_off = old_ramdisk_off + align(original_ramdisk_size, page)
-    old_tail_off = old_second_off + align(original_second_size, page)
-    old_ramdisk_end = old_ramdisk_off + original_ramdisk_size
-    if old_tail_off < old_ramdisk_end:
-        raise SystemExit("Invalid boot image layout")
-    tail = original[old_tail_off:]
-
-    with tempfile.TemporaryDirectory(prefix="boot-repack-", dir=ROOT) as tmp:
-        ramdisk, module_count, module_bytes = make_ramdisk(tmp)
-
-    kernel = KERNEL.read_bytes()
-    header = bytearray(original[:page])
-    put_u32(header, 8, len(kernel))
-    put_u32(header, 16, len(ramdisk))
-    digest = hashlib.sha1(kernel + ramdisk + tail).digest()
-    header[576:596] = digest
-    header[596:608] = b"\0" * 12
-
-    image = bytearray(header)
-    image += kernel
-    image += b"\0" * (align(len(image), page) - len(image))
-    image += ramdisk
-    image += b"\0" * (align(len(image), page) - len(image))
-    image += tail
-    if len(image) < TARGET_SIZE:
-        image += b"\0" * (TARGET_SIZE - len(image))
-    OUTPUT.write_bytes(image)
-
-    print(f"output={OUTPUT}")
-    print(f"size={len(image)} bytes ({len(image) / 1048576:.2f} MiB)")
-    print(f"kernel={len(kernel)} bytes")
-    print(f"ramdisk={len(ramdisk)} bytes")
-    print(f"modules={module_count} files, {module_bytes} uncompressed bytes")
-    print(f"sha256={hashlib.sha256(image).hexdigest()}")
-    print(f"original_size={TARGET_SIZE} bytes")
-
-
-if __name__ == "__main__":
-    main()
-PYEOF_REPACK
-
-ROOT="$ROOT" \
-REFERENCE_BOOT="$REFERENCE_DIR/boot.img" \
-KERNEL_IMAGE="$OUT/arch/arm64/boot/Image.gz" \
-MODULE_ROOT="$OUT" \
-OUTPUT_BOOT="$OUTPUT_BOOT" \
-  python3 "$REPACK_PY"
-
-# =====================================================================
-# 11. COLLECTE DES ARTEFACTS
-# =====================================================================
-echo ""
-echo "=== Collecte des artefacts ==="
-cp "$REFERENCE_DIR/dtbo.img" "$OUTPUT_DIR/dtbo.img" 2>/dev/null || true
-cp "$OUT/arch/arm64/boot/Image.gz" "$OUTPUT_DIR/Image.gz" 2>/dev/null || true
-cp "$LOG" "$OUTPUT_DIR/build.log" 2>/dev/null || true
-
-echo ""
-echo "═══════════════════════════════════════════════════════════════"
-echo "=== BUILD TERMINÉ ==="
-echo "═══════════════════════════════════════════════════════════════"
-ls -lh "$OUTPUT_DIR/"
-echo ""
-echo "SHA-256 du boot.img :"
-sha256sum "$OUTPUT_BOOT" 2>/dev/null || true
+    modules = sorted(MODULE_ROOT.r
