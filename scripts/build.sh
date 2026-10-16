@@ -10,6 +10,7 @@ df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
 DTBO_GDRIVE_ID="11451aa0CCzyVtNTYOK2n6oH6E0PT-2NX"
+KSU_COMMIT="5b76b884c75f729a220bb317aa4a4fc78f0e0e9c"
 
 sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
 sudo apt-get clean || true
@@ -32,7 +33,7 @@ git log --oneline -1
 # ==================== 2. INTÉGRATION BakaSU ====================
 echo "=== Intégration BakaSU ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu || true
-curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s -- "$KSU_COMMIT"
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration BakaSU"
@@ -55,13 +56,15 @@ echo "Téléchargement du patch depuis : $PATCH_URL"
 
 if curl -sSfL "$PATCH_URL" -o /tmp/susfs_4.19.patch; then
     echo "Application du patch..."
-    patch -p1 < /tmp/susfs_4.19.patch 2>&1 | tail -15 || true
+    patch -p1 --forward --batch < /tmp/susfs_4.19.patch 2>&1 | tee /tmp/susfs-apply.log || true
     rm -f /tmp/susfs_4.19.patch
 else
     echo "❌ Échec du téléchargement du patch SUSFS."
     exit 1
 fi
-find . -name "*.rej" -type f -delete 2>/dev/null || true
+if find . -type f -name '*.rej' -print -quit | grep -q .; then
+    echo "⚠️ Rejets SUSFS détectés; résolution ciblée en cours"
+fi
 
 # ==================== 5. CORRECTIONS ROBUSTES (Python) ====================
 echo "=== Corrections post-patch robustes ==="
@@ -113,6 +116,22 @@ if os.path.exists(filepath):
                 f.write('\n'.join(lines))
             print("✅ Header susfs_def.h ajouté avec succès à fs/super.c")
 
+    with open(filepath, 'r') as f:
+        content = f.read()
+    decl = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+'''
+    if 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;' not in content:
+        marker = '#include "internal.h"'
+        if marker not in content:
+            raise SystemExit('❌ fs/super.c: ancre internal.h absente')
+        content = content.replace(marker, marker + '\n' + decl, 1)
+        with open(filepath, 'w') as f:
+            f.write(content)
+        print('✅ Déclarations SUSFS ajoutées à fs/super.c')
+
 # 3. Faire de même pour fs/namespace.c et fs/stat.c
 for fpath in ["fs/namespace.c", "fs/stat.c"]:
     if os.path.exists(fpath):
@@ -129,6 +148,54 @@ for fpath in ["fs/namespace.c", "fs/stat.c"]:
                         print(f"✅ Header ajouté à {fpath}")
                         break
 
+# 4. Hook execve compatible avec le contrôle BakaSU/compat.
+exec_path = "fs/exec.c"
+if os.path.exists(exec_path):
+    content = open(exec_path).read()
+    if 'ksu_handle_post_execveat' not in content:
+        decl = '''#ifdef CONFIG_KSU_SUSFS
+extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                               void *argv, void *envp, int *flags);
+extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                                    void *argv, void *envp, int *flags, int *retval);
+#endif
+'''
+        anchor = 'int suid_dumpable = 0;'
+        if anchor not in content:
+            raise SystemExit('❌ fs/exec.c: ancre suid_dumpable absente')
+        content = content.replace(anchor, decl + '\n' + anchor, 1)
+        old = '''{
+\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);
+}'''
+        new = '''{
+#ifdef CONFIG_KSU_SUSFS
+\tint retval;
+\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);
+\tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
+\treturn retval;
+#else
+\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);
+#endif
+}'''
+        if old not in content:
+            raise SystemExit('❌ fs/exec.c: corps do_execveat_common inattendu')
+        content = content.replace(old, new, 1)
+        open(exec_path, 'w').write(content)
+        print('✅ Hook execve/post-exec BakaSU ajouté à fs/exec.c')
+
+# Les rejets sont acceptés uniquement si le hunk fs/super.c est réparé.
+rejects = []
+for root, _, names in os.walk('.'):
+    rejects.extend(os.path.join(root, n) for n in names if n.endswith('.rej'))
+if rejects:
+    bad = [p for p in rejects if p != './fs/super.c.rej']
+    if bad or 'susfs_is_sdcard_android_data_not_decrypted' not in open('fs/super.c').read():
+        raise SystemExit('❌ Rejets SUSFS non résolus: ' + ', '.join(rejects))
+    for p in rejects:
+        os.remove(p)
+    print('✅ Rejet fs/super.c résolu manuellement; aucun .rej restant')
+
 print("✅ Toutes les corrections post-patch ont réussi.")
 PYEOF
 
@@ -143,6 +210,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 cat << 'EOF' >> out/.config
 CONFIG_KSU=y
+CONFIG_KSU_MULTI_MANAGER_SUPPORT=y
 CONFIG_KSU_SUSFS=y
 CONFIG_KSU_SUSFS_SUS_PATH=y
 CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -163,12 +231,19 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 echo "→ Forçage des options KSU..."
 sed -i 's/^# CONFIG_KSU is not set$/CONFIG_KSU=y/' out/.config
+sed -i 's/^# CONFIG_KSU_MULTI_MANAGER_SUPPORT is not set$/CONFIG_KSU_MULTI_MANAGER_SUPPORT=y/' out/.config
 sed -i 's/^# CONFIG_KSU_SUSFS is not set$/CONFIG_KSU_SUSFS=y/' out/.config
 sed -i 's/^CONFIG_KSU_MANUAL_HOOK=y$/# CONFIG_KSU_MANUAL_HOOK is not set/' out/.config
 sed -i 's/^CONFIG_KSU_TRACEPOINT_HOOK=y$/# CONFIG_KSU_TRACEPOINT_HOOK is not set/' out/.config
 
 echo "=== VÉRIFICATION FINALE DU .CONFIG ==="
-grep -E "^CONFIG_KSU=|^CONFIG_KSU_SUSFS=|^CONFIG_KSU_MANUAL_HOOK=" out/.config || echo "❌ ERREUR CRITIQUE : KSU n'est pas activé !"
+grep -E "^CONFIG_KSU=|^CONFIG_KSU_MULTI_MANAGER_SUPPORT=|^CONFIG_KSU_SUSFS=|^CONFIG_KSU_MANUAL_HOOK=" out/.config || echo "❌ ERREUR CRITIQUE : KSU n'est pas activé !"
+grep -q '^CONFIG_KSU=y$' out/.config
+grep -q '^CONFIG_KSU_MULTI_MANAGER_SUPPORT=y$' out/.config
+grep -q '^CONFIG_KSU_SUSFS=y$' out/.config
+! grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config
+! grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' out/.config
+grep -q 'ksu_handle_post_execveat' fs/exec.c
 
 # ==================== 7. PATCHS MOTOROLA ====================
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
@@ -208,6 +283,8 @@ export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_RO
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src"
 git clone --depth=1 https://github.com/Baka-SU/BakaSU.git "$GITHUB_WORKSPACE/ksud-src"
+git -C "$GITHUB_WORKSPACE/ksud-src" fetch --depth=1 origin "$KSU_COMMIT"
+git -C "$GITHUB_WORKSPACE/ksud-src" checkout --detach "$KSU_COMMIT"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 
 mkdir -p .cargo
