@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V2.6 : KernelSU-Next (legacy) + Patchs Manuels + Backport path_umount
+# KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + ksud (dev)
+# Testé pour noyau 4.19 - Motorola One 5G Ace (kiev)
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.6 ==="
+echo "=== Build KernelSU-Next (legacy) pour noyau 4.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -17,7 +18,7 @@ sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.l
 sudo apt-get update
 sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev \
   libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld \
-  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio
+  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio libclang-dev
 
 pip3 install --quiet gdown
 cd "$GITHUB_WORKSPACE"
@@ -31,6 +32,7 @@ git log --oneline -1
 echo "=== Intégration KernelSU-Next (legacy) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
+# La branche 'legacy' est celle prévue pour les noyaux non-GKI (4.14+)
 curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
@@ -137,7 +139,7 @@ if [ -n "$FILES_ANON_INODE" ]; then
     done
 fi
 
-# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (CORRIGÉ) ====================
+# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (CORRIGÉS) ====================
 echo ""
 echo "=== Application des 5 Patchs Manuels KernelSU-Next ==="
 
@@ -156,7 +158,7 @@ if 'ksu_handle_execveat' not in content:
 else:
     print("✅ fs/exec.c déjà patché")
 
-# 2. fs/open.c
+# 2. fs/open.c (Ciblage de do_faccessat)
 with open('fs/open.c', 'r') as f: content = f.read()
 if 'ksu_handle_faccessat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
@@ -164,11 +166,11 @@ if 'ksu_handle_faccessat' not in content:
     call = "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\t"
     content = re.sub(r'(\tif\s*\(mode\s*&\s*~S_IRWXO\))', call + r'\1', content, count=1)
     with open('fs/open.c', 'w') as f: f.write(content)
-    print("✅ fs/open.c patché")
+    print("✅ fs/open.c patché (via do_faccessat)")
 else:
     print("✅ fs/open.c déjà patché")
 
-# 3. fs/read_write.c
+# 3. fs/read_write.c (Ciblage chirurgical + cast)
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
@@ -178,11 +180,12 @@ if 'ksu_handle_sys_read' not in content:
         start_pos = content.find('SYSCALL_DEFINE3(read,')
         ret_pos = content.find('ssize_t ret = -EBADF;', start_pos)
         if ret_pos != -1:
+            # Le cast (char __user **) est crucial pour le noyau 4.19
             call = "\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, (char __user **)&buf, &count);\n#endif"
             insert_pos = ret_pos + len('ssize_t ret = -EBADF;')
             content = content[:insert_pos] + call + content[insert_pos:]
             with open('fs/read_write.c', 'w') as f: f.write(content)
-            print("✅ fs/read_write.c patché (chirurgical avec cast)")
+            print("✅ fs/read_write.c patché (chirurgical + cast)")
         else:
             print("❌ Impossible de trouver 'ssize_t ret = -EBADF;' dans read")
     else:
@@ -317,9 +320,9 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD (KernelSU-Next) ====================
+# ==================== 7. COMPILATION KSUD (depuis la branche 'dev') ====================
 echo ""
-echo "=== Compilation ksud (KernelSU-Next) ==="
+echo "=== Compilation ksud (KernelSU-Next dev) ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -330,8 +333,10 @@ export AARCH64_CLANG_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_
 export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++"
 export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
+
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch legacy https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
+# On clone la branche 'dev' qui contient le dossier userspace/ksud
+git clone --depth=1 --branch dev https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -348,7 +353,7 @@ cargo +nightly build --release --target aarch64-linux-android
 KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
 if [ -z "$KSUD_BINARY" ]; then echo "❌ ksud introuvable"; exit 1; fi
 cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud compilé (KernelSU-Next legacy)"
+echo "✅ ksud compilé (KernelSU-Next dev)"
 cd "$GITHUB_WORKSPACE"
 
 # ==================== 8. REPACK (MÉTHODE BACKSLASHXX) ====================
@@ -421,10 +426,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.6-boot.img
+cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.7-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.6 (KernelSU-Next sans SUSFS) ==="
+echo "=== BUILD TERMINÉ v2.7 (KernelSU-Next sans SUSFS) ==="
 ls -lh output/
