@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V2.5 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS) [FIX CHIRURGICAL]
+# V2.6 : KernelSU-Next (legacy) + Patchs Manuels + Backport path_umount
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.5 ==="
+echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.6 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -160,7 +160,6 @@ else:
 with open('fs/open.c', 'r') as f: content = f.read()
 if 'ksu_handle_faccessat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
-    # Correction : on cible do_faccessat au lieu de SYSCALL_DEFINE3
     content = re.sub(r'(long\s+do_faccessat\s*\()', extern + r'\1', content, count=1)
     call = "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\t"
     content = re.sub(r'(\tif\s*\(mode\s*&\s*~S_IRWXO\))', call + r'\1', content, count=1)
@@ -173,22 +172,15 @@ else:
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
-    
-    # 1. Ajouter l'extern juste avant SYSCALL_DEFINE3(read,
     match = re.search(r'(SYSCALL_DEFINE3\s*\(\s*read\s*,)', content)
     if match:
         content = content[:match.start()] + extern + content[match.start():]
-        
-        # 2. Trouver "ssize_t ret = -EBADF;" DANS cette fonction et injecter l'appel
         start_pos = content.find('SYSCALL_DEFINE3(read,')
         ret_pos = content.find('ssize_t ret = -EBADF;', start_pos)
-        
         if ret_pos != -1:
-            # LA CORRECTION EST ICI : ajout du (char __user **)
             call = "\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, (char __user **)&buf, &count);\n#endif"
             insert_pos = ret_pos + len('ssize_t ret = -EBADF;')
             content = content[:insert_pos] + call + content[insert_pos:]
-            
             with open('fs/read_write.c', 'w') as f: f.write(content)
             print("✅ fs/read_write.c patché (chirurgical avec cast)")
         else:
@@ -197,6 +189,7 @@ if 'ksu_handle_sys_read' not in content:
         print("❌ Impossible de trouver 'SYSCALL_DEFINE3(read,'")
 else:
     print("✅ fs/read_write.c déjà patché")
+
 # 4. fs/stat.c
 with open('fs/stat.c', 'r') as f: content = f.read()
 if 'ksu_handle_stat' not in content:
@@ -220,7 +213,6 @@ if 'ksu_handle_sys_reboot' not in content:
     print("✅ kernel/reboot.c patché")
 else:
     print("✅ kernel/reboot.c déjà patché")
-PYEOF
 
 # 6. fs/namespace.c (Backport de path_umount depuis Linux 5.9)
 with open('fs/namespace.c', 'r') as f: content = f.read()
@@ -263,13 +255,13 @@ int path_umount(struct path *path, int flags)
 #endif
 
 '''
-    # Insérer avant la fonction ksys_umount
     content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport + r'\1', content, count=1)
     with open('fs/namespace.c', 'w') as f: f.write(content)
     print("✅ fs/namespace.c patché (backport path_umount)")
 else:
     print("✅ fs/namespace.c déjà patché")
-    
+
+PYEOF
 
 # ==================== 4. CONFIGURATION ====================
 echo ""
@@ -429,10 +421,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.5-boot.img
+cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.6-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.5 (KernelSU-Next sans SUSFS) ==="
+echo "=== BUILD TERMINÉ v2.6 (KernelSU-Next sans SUSFS) ==="
 ls -lh output/
