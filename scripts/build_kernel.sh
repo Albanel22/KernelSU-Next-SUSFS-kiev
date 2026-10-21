@@ -331,7 +331,7 @@ export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x8
 export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch next https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch legacy https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -348,7 +348,7 @@ cargo +nightly build --release --target aarch64-linux-android
 KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
 if [ -z "$KSUD_BINARY" ]; then echo "❌ ksud introuvable"; exit 1; fi
 cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud compilé (KernelSU-Next)"
+echo "✅ ksud compilé (KernelSU-Next legacy)"
 cd "$GITHUB_WORKSPACE"
 
 # ==================== 8. REPACK (MÉTHODE BACKSLASHXX) ====================
