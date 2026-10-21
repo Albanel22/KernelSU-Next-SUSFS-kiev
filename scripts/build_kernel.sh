@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# V1:Kernelsu-Next main + patch JackA1ltman + INLINE HOOKS JackA1ltman
-#       + FIX O_CLOEXEC + FIX SECCOMP + FIX SIDTAB
+# V1: KernelSU-Next (legacy) + patch JackA1ltman + INLINE HOOKS JackA1ltman
+#     + FIX O_CLOEXEC
 # =============================================================================
 
-echo "=== Build BakaSU (main + inline hooks JackA1ltman) v31 ==="
+echo "=== Build KernelSU-Next (legacy + inline hooks JackA1ltman) ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -28,16 +28,16 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION BakaSU (main) ====================
-echo "=== Intégration BakaSU (main) ==="
+# ==================== 2. INTÉGRATION KernelSU-Next (legacy) ====================
+echo "=== Intégration KernelSU-Next (legacy) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
+curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
-    echo "❌ Échec intégration BakaSU"; exit 1
+    echo "❌ Échec intégration KernelSU-Next"; exit 1
 fi
-echo "✅ BakaSU (main) intégré"
+echo "✅ KernelSU-Next (legacy) intégré"
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -142,202 +142,6 @@ else
     echo "  ⚠️  Aucun anon_inode_getfile trouvé."
 fi
 
-# ==================== 2f. VÉRIFICATION disable_seccomp (NON-GKI) ====================
-echo ""
-echo "=== Vérification disable_seccomp pour noyau 4.19 ==="
-
-APP_PROFILE=$(find "$KSU_DIR" -name "app_profile.c" 2>/dev/null | head -1 || true)
-if [ -n "$APP_PROFILE" ]; then
-    echo "Fichier trouvé : $APP_PROFILE"
-    
-    if grep -q "escape_with_root_profile" "$APP_PROFILE"; then
-        if ! grep -A 20 "void escape_with_root_profile" "$APP_PROFILE" | grep -q "disable_seccomp"; then
-            echo "⚠️  disable_seccomp() non appelée dans escape_with_root_profile, injection..."
-            python3 - "$APP_PROFILE" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
-
-pattern = r'(void\s+escape_with_root_profile\s*\([^)]*\)\s*\{)'
-match = re.search(pattern, content)
-if match:
-    body_start = match.end()
-    lines = content[body_start:].split('\n')
-    insert_line = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped and not stripped.startswith('struct') and not stripped.startswith('int ') and not stripped.startswith('return'):
-            insert_line = i
-            break
-    
-    reset_code = '\n\tdisable_seccomp();\n'
-    if insert_line > 0:
-        lines.insert(insert_line, reset_code)
-    else:
-        lines.insert(0, reset_code)
-    
-    content = content[:body_start] + '\n'.join(lines)
-    with open(path, 'w') as f:
-        f.write(content)
-    print("✅ disable_seccomp() injectée dans escape_with_root_profile")
-else:
-    print("❌ escape_with_root_profile non trouvée")
-PYEOF
-        else
-            echo "✅ disable_seccomp() déjà appelée dans escape_with_root_profile"
-        fi
-    else
-        echo "⚠️  escape_with_root_profile non trouvée dans app_profile.c"
-    fi
-    
-    if grep -q "^static void disable_seccomp" "$APP_PROFILE"; then
-        echo "⚠️  disable_seccomp est static, correction..."
-        sed -i 's/^static void disable_seccomp/void disable_seccomp/' "$APP_PROFILE"
-    fi
-else
-    echo "⚠️  app_profile.c introuvable"
-fi
-
-# ==================== 2g. FIX SECCOMP DANS setuid_hook (BACKSLASHXX) ====================
-echo ""
-echo "=== Fix seccomp dans setuid_hook (méthode backslashxx) ==="
-
-SETUID_HOOK=$(find "$KSU_DIR" -name "setuid_hook.c" 2>/dev/null | head -1 || true)
-
-if [ -f "$SETUID_HOOK" ]; then
-    echo "Fichier trouvé : $SETUID_HOOK"
-    
-    if grep -q "ksu_seccomp_allow_cache.*__NR_reboot" "$SETUID_HOOK"; then
-        echo "✅ ksu_seccomp_allow_cache(__NR_reboot) déjà présent"
-    else
-        echo "⚠️  Remplacement de disable_seccomp() par ksu_seccomp_allow_cache(__NR_reboot)..."
-        python3 - "$SETUID_HOOK" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
-
-old_block = '''#else
-        disable_seccomp();
-#endif'''
-new_block = '''#else
-        if (current->seccomp.mode == SECCOMP_MODE_FILTER && current->seccomp.filter) {
-            spin_lock_irq(&current->sighand->siglock);
-            ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
-            spin_unlock_irq(&current->sighand->siglock);
-        }
-#endif'''
-
-if old_block in content:
-    content = content.replace(old_block, new_block, 1)
-    with open(path, 'w') as f:
-        f.write(content)
-    print("✅ disable_seccomp() remplacé par ksu_seccomp_allow_cache(__NR_reboot)")
-else:
-    if 'disable_seccomp();' in content:
-        print("⚠️  Bloc #else exact non trouvé, remplacement direct...")
-        content = content.replace('disable_seccomp();', 
-            '''if (current->seccomp.mode == SECCOMP_MODE_FILTER && current->seccomp.filter) {
-            spin_lock_irq(&current->sighand->siglock);
-            ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
-            spin_unlock_irq(&current->sighand->siglock);
-        }''', 1)
-        with open(path, 'w') as f:
-            f.write(content)
-        print("✅ disable_seccomp() remplacé")
-    else:
-        print("❌ disable_seccomp() non trouvé")
-PYEOF
-    fi
-else
-    echo "⚠️  setuid_hook.c introuvable"
-fi
-
-# ==================== 2h. FIX SIDTAB SYNC (COMMIT UPSTREAM a810677) ====================
-echo ""
-echo "=== Fix sidtab sync (commit upstream a810677) ==="
-
-SELINUX_C=$(find "$KSU_DIR" -name "selinux.c" -path "*selinux*" 2>/dev/null | head -1 || true)
-
-if [ -f "$SELINUX_C" ]; then
-    echo "Fichier trouvé : $SELINUX_C"
-    
-    if grep -q "sync to global sidtab" "$SELINUX_C"; then
-        echo "✅ Sync sidtab déjà présente"
-    else
-        echo "⚠️  Sync sidtab absente, injection..."
-        python3 - "$SELINUX_C" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
-
-count = 0
-
-old_pattern = '''length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL);
-    if (length)
-        goto out;'''
-new_pattern = '''length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL);
-    if (length) {
-        goto out;
-    } else {
-        // sync to global sidtab
-        security_context_to_sid(buf, size, &tmp, GFP_KERNEL);
-    }'''
-
-if old_pattern in content:
-    content = content.replace(old_pattern, new_pattern, 1)
-    count += 1
-
-old_scon = '''length = security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL);
-    if (length)
-        goto out;'''
-new_scon = '''length = security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL);
-    if (length) {
-        goto out;
-    } else {
-        // sync to global sidtab
-        security_context_to_sid(scon, strlen(scon), &tmp, GFP_KERNEL);
-    }'''
-
-if old_scon in content:
-    content = content.replace(old_scon, new_scon, 1)
-    count += 1
-
-old_tcon = '''length = security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL);
-    if (length)
-        goto out;'''
-new_tcon = '''length = security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL);
-    if (length) {
-        goto out;
-    } else {
-        // sync to global sidtab
-        security_context_to_sid(tcon, strlen(tcon), &tmp, GFP_KERNEL);
-    }'''
-
-if old_tcon in content:
-    content = content.replace(old_tcon, new_tcon, 1)
-    count += 1
-
-if 'u32 sid, len;' in content and 'u32 sid, len, tmp;' not in content:
-    content = content.replace('u32 sid, len;', 'u32 sid, len, tmp;', 1)
-
-if 'u32 ssid, tsid;' in content and 'u32 ssid, tsid, tmp;' not in content:
-    content = content.replace('u32 ssid, tsid;', 'u32 ssid, tsid, tmp;', 1)
-
-if count > 0:
-    with open(path, 'w') as f:
-        f.write(content)
-    print(f"✅ {count} bloc(s) de sync sidtab injecté(s)")
-else:
-    print("⚠️  Aucun pattern correspondant trouvé.")
-PYEOF
-    fi
-else
-    echo "⚠️  selinux.c introuvable"
-fi
-
 # ==================== 3. PATCH SUSFS (JackA1ltman) ====================
 echo ""
 echo "=== Patch SUSFS 4.19 (JackA1ltman) ==="
@@ -424,19 +228,16 @@ if [ -f "$INLINE_HOOK_SCRIPT" ]; then
     echo "Script trouvé : $INLINE_HOOK_SCRIPT"
     chmod +x "$INLINE_HOOK_SCRIPT"
     
-    # Le script doit être exécuté depuis la racine du noyau
     bash "$INLINE_HOOK_SCRIPT" 2>&1 | tee /tmp/inline_hook.log
     
     echo ""
     echo "=== Résumé des hooks appliqués ==="
     grep -E "\[\+\].*Patched|\[-\].*failed|\[-\].*Skipped|Warning.*contains" /tmp/inline_hook.log | head -40 || true
     
-    # Vérification critique : kernel/reboot.c doit être patché
     if grep -q "kernel/reboot.c Patched" /tmp/inline_hook.log; then
         echo "✅ kernel/reboot.c patché par JackA1ltman"
     else
         echo "❌ kernel/reboot.c NON patché par JackA1ltman"
-        echo "   Vérifie si 'ksu_handle' était déjà présent (Warning ci-dessus)"
     fi
     
     if grep -q "kernel/sys.c Patched" /tmp/inline_hook.log; then
@@ -449,9 +250,9 @@ else
     exit 1
 fi
 
-# ==================== 5. CONFIGURATION (SUSFS + SECCOMP) ====================
+# ==================== 5. CONFIGURATION (KernelSU-Next Manual Hooks) ====================
 echo ""
-echo "=== Configuration (SUSFS pur + SECCOMP) ==="
+echo "=== Configuration (KernelSU-Next Manual Hooks + SUSFS) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -460,10 +261,11 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 
 {
   echo "CONFIG_KSU=y"
+  echo "CONFIG_KSU_MANUAL_HOOK=y"
+  echo "# CONFIG_KSU_WITH_KPROBES is not set"
   echo "CONFIG_KSU_SUSFS=y"
   echo "# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set"
   echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
-  echo "# CONFIG_KSU_MANUAL_HOOK is not set"
   echo "CONFIG_KPROBES=y"
   echo "CONFIG_HAVE_KPROBES=y"
   echo "CONFIG_KRETPROBES=y"
@@ -476,7 +278,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -5
 
 echo "=== État final .config ==="
-grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_TRACEPOINT|KSU_TAMPER|KPROBES|SECCOMP" out/.config | head -20 || true
+grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_WITH_KPROBES|KSU_TRACEPOINT|KSU_TAMPER|KPROBES|SECCOMP" out/.config | head -20 || true
 
 if ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
     echo "❌ CONFIG_KSU_SUSFS non activé, abandon"
@@ -502,9 +304,9 @@ else
     exit 1
 fi
 
-# ==================== 8. COMPILATION KSUD (BakaSU main) ====================
+# ==================== 8. COMPILATION KSUD (KernelSU-Next) ====================
 echo ""
-echo "=== Compilation ksud (BakaSU main) ==="
+echo "=== Compilation ksud (KernelSU-Next) ==="
 cd "$GITHUB_WORKSPACE"
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
@@ -516,7 +318,7 @@ export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x8
 export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-git clone --depth=1 --branch main https://github.com/Baka-SU/BakaSU.git "$GITHUB_WORKSPACE/ksud-src"
+git clone --depth=1 --branch next https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
@@ -533,7 +335,7 @@ cargo +nightly build --release --target aarch64-linux-android
 KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
 if [ -z "$KSUD_BINARY" ]; then echo "❌ ksud introuvable"; exit 1; fi
 cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud compilé (main)"
+echo "✅ ksud compilé (KernelSU-Next)"
 cd "$GITHUB_WORKSPACE"
 
 # ==================== 9. REPACK (MÉTHODE BACKSLASHXX) ====================
@@ -606,10 +408,10 @@ cd ..
 
 # ==================== 11. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/BakaSU-SUSFS-v31-boot.img
+cp final_boot.img output/KernelSU-Next-SUSFS-v1-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v31 ==="
+echo "=== BUILD TERMINÉ v1 ==="
 ls -lh output/
