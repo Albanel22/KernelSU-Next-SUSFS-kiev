@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V2.4 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS) [FIX CHIRURGICAL]
+# V2.5 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS) [FIX CHIRURGICAL]
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.4 ==="
+echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.5 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -137,7 +137,7 @@ if [ -n "$FILES_ANON_INODE" ]; then
     done
 fi
 
-# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (CHIRURGICAL) ====================
+# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (CORRIGÉ) ====================
 echo ""
 echo "=== Application des 5 Patchs Manuels KernelSU-Next ==="
 
@@ -148,11 +148,9 @@ import re
 with open('fs/exec.c', 'r') as f: content = f.read()
 if 'ksu_handle_execveat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\n\n"
-    content = re.sub(r'(\bint\s+do_execve\s*\()', extern + r'\1', content)
-    
+    content = re.sub(r'(int\s+do_execve\s*\()', extern + r'\1', content, count=1)
     call = "#ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n\t"
-    content = re.sub(r'(\treturn\s+do_execveat_common\s*\()', call + r'\1', content)
-    
+    content = re.sub(r'(\treturn\s+do_execveat_common\(AT_FDCWD,\s*filename,\s*argv,\s*envp,\s*0\);)', call + r'\1', content, count=1)
     with open('fs/exec.c', 'w') as f: f.write(content)
     print("✅ fs/exec.c patché")
 else:
@@ -162,37 +160,31 @@ else:
 with open('fs/open.c', 'r') as f: content = f.read()
 if 'ksu_handle_faccessat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
-    content = re.sub(r'(long\s+do_faccessat\s*\()', extern + r'\1', content)
-    
+    # Correction : on cible do_faccessat au lieu de SYSCALL_DEFINE3
+    content = re.sub(r'(long\s+do_faccessat\s*\()', extern + r'\1', content, count=1)
     call = "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\t"
-    content = re.sub(r'(\tif\s*\(mode\s*&\s*~S_IRWXO\))', call + r'\1', content)
-    
+    content = re.sub(r'(\tif\s*\(mode\s*&\s*~S_IRWXO\))', call + r'\1', content, count=1)
     with open('fs/open.c', 'w') as f: f.write(content)
     print("✅ fs/open.c patché")
 else:
     print("✅ fs/open.c déjà patché")
 
-# 3. fs/read_write.c (CHIRURGICAL)
+# 3. fs/read_write.c
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
-    
-    # 1. Ajouter l'extern juste avant SYSCALL_DEFINE3(read,
+    # Correction : on utilise une approche par position pour cibler uniquement 'read'
     match = re.search(r'(SYSCALL_DEFINE3\s*\(\s*read\s*,)', content)
     if match:
         content = content[:match.start()] + extern + content[match.start():]
-        
-        # 2. Trouver "ssize_t ret = -EBADF;" DANS cette fonction et injecter l'appel
         start_pos = content.find('SYSCALL_DEFINE3(read,')
         ret_pos = content.find('ssize_t ret = -EBADF;', start_pos)
-        
         if ret_pos != -1:
             call = "\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif"
             insert_pos = ret_pos + len('ssize_t ret = -EBADF;')
             content = content[:insert_pos] + call + content[insert_pos:]
-            
             with open('fs/read_write.c', 'w') as f: f.write(content)
-            print("✅ fs/read_write.c patché (chirurgical)")
+            print("✅ fs/read_write.c patché")
         else:
             print("❌ Impossible de trouver 'ssize_t ret = -EBADF;' dans read")
     else:
@@ -204,11 +196,9 @@ else:
 with open('fs/stat.c', 'r') as f: content = f.read()
 if 'ksu_handle_stat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n\n"
-    content = re.sub(r'(SYSCALL_DEFINE4\s*\(\s*newfstatat)', extern + r'\1', content)
-    
+    content = re.sub(r'(SYSCALL_DEFINE4\s*\(\s*newfstatat)', extern + r'\1', content, count=1)
     call = "#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\t"
-    content = re.sub(r'(\terror\s*=\s*vfs_fstatat\(dfd,\s*filename,\s*&stat,\s*flag\);)', call + r'\1', content)
-    
+    content = re.sub(r'(\terror\s*=\s*vfs_fstatat\(dfd,\s*filename,\s*&stat,\s*flag\);)', call + r'\1', content, count=1)
     with open('fs/stat.c', 'w') as f: f.write(content)
     print("✅ fs/stat.c patché")
 else:
@@ -218,11 +208,9 @@ else:
 with open('kernel/reboot.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_reboot' not in content:
     extern = "#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
-    content = re.sub(r'(SYSCALL_DEFINE4\s*\(\s*reboot)', extern + r'\1', content)
-    
+    content = re.sub(r'(SYSCALL_DEFINE4\s*\(\s*reboot)', extern + r'\1', content, count=1)
     call = "#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\t"
-    content = re.sub(r'(/\*\s*We only trust the superuser with rebooting the system\.\s*\*/)', call + r'\1', content)
-    
+    content = re.sub(r'(/\*\s*We only trust the superuser with rebooting the system\.\s*\*/)', call + r'\1', content, count=1)
     with open('kernel/reboot.c', 'w') as f: f.write(content)
     print("✅ kernel/reboot.c patché")
 else:
@@ -387,10 +375,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.4-boot.img
+cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.5-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.4 (KernelSU-Next sans SUSFS) ==="
+echo "=== BUILD TERMINÉ v2.5 (KernelSU-Next sans SUSFS) ==="
 ls -lh output/
