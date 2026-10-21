@@ -173,25 +173,30 @@ else:
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
-    # Correction : on utilise une approche par position pour cibler uniquement 'read'
+    
+    # 1. Ajouter l'extern juste avant SYSCALL_DEFINE3(read,
     match = re.search(r'(SYSCALL_DEFINE3\s*\(\s*read\s*,)', content)
     if match:
         content = content[:match.start()] + extern + content[match.start():]
+        
+        # 2. Trouver "ssize_t ret = -EBADF;" DANS cette fonction et injecter l'appel
         start_pos = content.find('SYSCALL_DEFINE3(read,')
         ret_pos = content.find('ssize_t ret = -EBADF;', start_pos)
+        
         if ret_pos != -1:
-            call = "\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif"
+            # LA CORRECTION EST ICI : ajout du (char __user **)
+            call = "\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, (char __user **)&buf, &count);\n#endif"
             insert_pos = ret_pos + len('ssize_t ret = -EBADF;')
             content = content[:insert_pos] + call + content[insert_pos:]
+            
             with open('fs/read_write.c', 'w') as f: f.write(content)
-            print("✅ fs/read_write.c patché")
+            print("✅ fs/read_write.c patché (chirurgical avec cast)")
         else:
             print("❌ Impossible de trouver 'ssize_t ret = -EBADF;' dans read")
     else:
         print("❌ Impossible de trouver 'SYSCALL_DEFINE3(read,'")
 else:
     print("✅ fs/read_write.c déjà patché")
-
 # 4. fs/stat.c
 with open('fs/stat.c', 'r') as f: content = f.read()
 if 'ksu_handle_stat' not in content:
