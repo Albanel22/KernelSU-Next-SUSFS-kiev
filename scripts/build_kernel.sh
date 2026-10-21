@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V2.1 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS) [FIX REGEX]
+# V2.3 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS) [FIX FINAL]
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.1 ==="
+echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.3 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -137,9 +137,9 @@ if [ -n "$FILES_ANON_INODE" ]; then
     done
 fi
 
-# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (FIX REGEX) ====================
+# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (REGEX BLINDÉE) ====================
 echo ""
-echo "=== Application des 5 Patchs Manuels KernelSU-Next (Regex) ==="
+echo "=== Application des 5 Patchs Manuels KernelSU-Next (Regex Blindée) ==="
 
 python3 << 'PYEOF'
 import re
@@ -148,7 +148,7 @@ import re
 with open('fs/exec.c', 'r') as f: content = f.read()
 if 'ksu_handle_execveat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\n\n"
-    content = re.sub(r'(int\s+do_execve\s*\()', extern + r'\1', content)
+    content = re.sub(r'(\bint\s+do_execve\s*\()', extern + r'\1', content)
     
     call = "#ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n\t"
     content = re.sub(r'(\treturn\s+do_execveat_common\s*\()', call + r'\1', content)
@@ -162,8 +162,8 @@ else:
 with open('fs/open.c', 'r') as f: content = f.read()
 if 'ksu_handle_faccessat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
-    # Trouve n'importe quelle déclaration de faccessat
-    content = re.sub(r'(\b(?:SYSCALL_DEFINE\d\(|long\s+do_)faccessat\s*\()', extern + r'\1', content)
+    # On cherche do_faccessat qui est la vraie fonction de logique
+    content = re.sub(r'(long\s+do_faccessat\s*\()', extern + r'\1', content)
     
     call = "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\t"
     content = re.sub(r'(\tif\s*\(mode\s*&\s*~S_IRWXO\))', call + r'\1', content)
@@ -177,9 +177,10 @@ else:
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
-    content = re.sub(r'(SYSCALL_DEFINE3\(read)', extern + r'\1', content)
+    # La virgule après read est cruciale pour ne pas matcher readv ou readlink
+    content = re.sub(r'(SYSCALL_DEFINE3\s*\(\s*read\s*,)', extern + r'\1', content)
     
-    call = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif\n"
+    call = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif"
     content = re.sub(r'(struct\s+fd\s+f\s*=\s*fdget_pos\(fd\);\s*\n\s*ssize_t\s+ret\s*=\s*-EBADF;)', r'\1\n\n' + call, content)
     
     with open('fs/read_write.c', 'w') as f: f.write(content)
@@ -191,7 +192,7 @@ else:
 with open('fs/stat.c', 'r') as f: content = f.read()
 if 'ksu_handle_stat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n\n"
-    content = re.sub(r'(SYSCALL_DEFINE4\(newfstatat)', extern + r'\1', content)
+    content = re.sub(r'(SYSCALL_DEFINE4\s*\(\s*newfstatat)', extern + r'\1', content)
     
     call = "#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\t"
     content = re.sub(r'(\terror\s*=\s*vfs_fstatat\(dfd,\s*filename,\s*&stat,\s*flag\);)', call + r'\1', content)
@@ -205,7 +206,7 @@ else:
 with open('kernel/reboot.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_reboot' not in content:
     extern = "#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
-    content = re.sub(r'(SYSCALL_DEFINE4\(reboot)', extern + r'\1', content)
+    content = re.sub(r'(SYSCALL_DEFINE4\s*\(\s*reboot)', extern + r'\1', content)
     
     call = "#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\t"
     content = re.sub(r'(/\*\s*We only trust the superuser with rebooting the system\.\s*\*/)', call + r'\1', content)
@@ -374,10 +375,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.1-boot.img
+cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.3-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.1 (KernelSU-Next sans SUSFS) ==="
+echo "=== BUILD TERMINÉ v2.3 (KernelSU-Next sans SUSFS) ==="
 ls -lh output/
