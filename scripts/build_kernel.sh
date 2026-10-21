@@ -2,11 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V1: KernelSU-Next (legacy) + patch JackA1ltman + INLINE HOOKS JackA1ltman
-#     + FIX O_CLOEXEC
+# V2 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS)
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy + inline hooks JackA1ltman) ==="
+echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -116,7 +115,7 @@ echo "=== Static exports SELinux ==="
     sed -i 's/^static struct security_operations selinux_ops/struct security_operations selinux_ops/' security/selinux/hooks.c
 }
 
-# ==================== 2e. FIX O_CLOEXEC (BOUCLE GLOBALE) ====================
+# ==================== 2e. FIX O_CLOEXEC ====================
 echo ""
 echo "=== Fix O_CLOEXEC dans TOUS les fichiers (détection Manager) ==="
 
@@ -126,8 +125,6 @@ if [ -n "$FILES_GET_UNUSED" ]; then
         sed -i 's/get_unused_fd_flags(O_CLOEXEC)/get_unused_fd_flags(0)/g' "$f"
         echo "  ✅ get_unused_fd_flags fixé dans $f"
     done
-else
-    echo "  ⚠️  Aucun get_unused_fd_flags(O_CLOEXEC) trouvé."
 fi
 
 FILES_ANON_INODE=$(grep -rl "anon_inode_getfile" "$KSU_DIR/" 2>/dev/null || true)
@@ -138,121 +135,99 @@ if [ -n "$FILES_ANON_INODE" ]; then
         sed -i 's/, O_CLOEXEC)/)/g' "$f"
         echo "  ✅ anon_inode_getfile nettoyé dans $f"
     done
-else
-    echo "  ⚠️  Aucun anon_inode_getfile trouvé."
 fi
 
-# ==================== 3. PATCH SUSFS (JackA1ltman) ====================
+# ==================== 3. PATCHS MANUELS KERNELSU-NEXT ====================
 echo ""
-echo "=== Patch SUSFS 4.19 (JackA1ltman) ==="
-cd "$GITHUB_WORKSPACE"
-rm -rf /tmp/jack_repo 2>/dev/null || true
-git clone --depth=1 --branch mainline https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/jack_repo 2>/dev/null || true
+echo "=== Application des 5 Patchs Manuels KernelSU-Next ==="
 
-cd "$GITHUB_WORKSPACE/kernel_sources"
-PATCH_419="/tmp/jack_repo/Patches/Patch/susfs_patch_to_4.19.patch"
-
-if [ -f "$PATCH_419" ]; then
-    echo "Application du patch : $PATCH_419"
-    patch -p1 < "$PATCH_419" 2>&1 | tee /tmp/jack_patch.log | tail -20 || true
-else
-    echo "❌ Patch JackA1ltman introuvable."
-    ls /tmp/jack_repo/Patches/Patch/ 2>/dev/null | head -20 || true
-fi
-
-REJ_COUNT=$(find . -name "*.rej" -type f 2>/dev/null | wc -l)
-if [ "$REJ_COUNT" -gt 0 ]; then
-    echo "⚠️  $REJ_COUNT fichier(s) .rej généré(s)"
-    find . -name "*.rej" -type f 2>/dev/null
-fi
-
-find . -name "*.rej" -type f -delete 2>/dev/null || true
-find . -name "*.orig" -type f -delete 2>/dev/null || true
-echo "✅ Patch SUSFS (JackA1ltman) appliqué"
-
-# ==================== 3.5. CORRECTIONS POST-PATCH SUSFS ====================
-echo ""
-echo "=== Corrections post-patch SUSFS ==="
-for f in fs/proc/task_mmu.c fs/namespace.c fs/super.c fs/stat.c; do
-    [ -f "$f" ] && sed -i 's/^\(\s*\)struct vm_area_struct \*vma;/\1struct vm_area_struct *vma __maybe_unused;/g' "$f" 2>/dev/null || true
-done
-
-if [ -f "fs/namespace.c" ] && ! grep -q "susfs_def.h" fs/namespace.c; then
-    sed -i '/#include <linux\/sched\/task.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs_def.h>\n#endif\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n#define CL_COPY_MNT_NS BIT(25)\n#endif' fs/namespace.c
-fi
-
-if [ -f "fs/super.c" ] && ! grep -q "susfs_def.h" fs/super.c; then
 python3 << 'PYEOF'
-from pathlib import Path
-p = Path("fs/super.c")
-content = p.read_text()
-if 'susfs_def.h' not in content:
-    decl = '''
-#ifdef CONFIG_KSU_SUSFS
-#include <linux/susfs_def.h>
-#endif
+import re
 
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-extern bool susfs_is_current_ksu_domain(void);
-extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
-#endif
-'''
-    anchor = '#include "internal.h"'
-    if anchor in content:
-        content = content.replace(anchor, anchor + '\n' + decl, 1)
-        p.write_text(content)
+# 1. fs/exec.c
+with open('fs/exec.c', 'r') as f: content = f.read()
+if 'ksu_handle_execveat' not in content:
+    content = content.replace(
+        'int do_execve(struct filename *filename,',
+        '#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\n\nint do_execve(struct filename *filename,'
+    )
+    content = content.replace(
+        'return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);',
+        '#ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);'
+    )
+    with open('fs/exec.c', 'w') as f: f.write(content)
+    print("✅ fs/exec.c patché")
+else:
+    print("✅ fs/exec.c déjà patché")
+
+# 2. fs/open.c
+with open('fs/open.c', 'r') as f: content = f.read()
+if 'ksu_handle_faccessat' not in content:
+    content = content.replace(
+        'SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)',
+        '#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\nSYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)'
+    )
+    content = content.replace(
+        'if (mode & ~S_IRWXO)\t/* where\'s F_OK, X_OK, W_OK, R_OK? */',
+        '#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\tif (mode & ~S_IRWXO)\t/* where\'s F_OK, X_OK, W_OK, R_OK? */'
+    )
+    with open('fs/open.c', 'w') as f: f.write(content)
+    print("✅ fs/open.c patché")
+else:
+    print("✅ fs/open.c déjà patché")
+
+# 3. fs/read_write.c
+with open('fs/read_write.c', 'r') as f: content = f.read()
+if 'ksu_handle_sys_read' not in content:
+    content = content.replace(
+        'SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)',
+        '#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\nSYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)'
+    )
+    content = content.replace(
+        'struct fd f = fdget_pos(fd);\n\tssize_t ret = -EBADF;',
+        'struct fd f = fdget_pos(fd);\n\tssize_t ret = -EBADF;\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif'
+    )
+    with open('fs/read_write.c', 'w') as f: f.write(content)
+    print("✅ fs/read_write.c patché")
+else:
+    print("✅ fs/read_write.c déjà patché")
+
+# 4. fs/stat.c
+with open('fs/stat.c', 'r') as f: content = f.read()
+if 'ksu_handle_stat' not in content:
+    content = content.replace(
+        'SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)',
+        '#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n\nSYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)'
+    )
+    content = content.replace(
+        'error = vfs_fstatat(dfd, filename, &stat, flag);',
+        '#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);'
+    )
+    with open('fs/stat.c', 'w') as f: f.write(content)
+    print("✅ fs/stat.c patché")
+else:
+    print("✅ fs/stat.c déjà patché")
+
+# 5. kernel/reboot.c
+with open('kernel/reboot.c', 'r') as f: content = f.read()
+if 'ksu_handle_sys_reboot' not in content:
+    content = content.replace(
+        'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)',
+        '#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\nSYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)'
+    )
+    content = content.replace(
+        '/* We only trust the superuser with rebooting the system. */',
+        '#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\t/* We only trust the superuser with rebooting the system. */'
+    )
+    with open('kernel/reboot.c', 'w') as f: f.write(content)
+    print("✅ kernel/reboot.c patché")
+else:
+    print("✅ kernel/reboot.c déjà patché")
 PYEOF
-fi
 
-if [ -f "fs/stat.c" ] && ! grep -q "susfs_def.h" fs/stat.c; then
-python3 << 'PYEOF'
-from pathlib import Path
-p = Path("fs/stat.c")
-content = p.read_text()
-if 'susfs_def.h' not in content:
-    anchor = '#include <asm/unistd.h>'
-    if anchor in content:
-        content = content.replace(anchor, anchor + '\n\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n#include <linux/susfs_def.h>\n#endif', 1)
-        p.write_text(content)
-PYEOF
-fi
-echo "✅ Corrections SUSFS terminées"
-
-# ==================== 4. INLINE HOOKS SUSFS (JackA1ltman) ====================
+# ==================== 4. CONFIGURATION ====================
 echo ""
-echo "=== Application des inline hooks SUSFS (JackA1ltman) ==="
-
-INLINE_HOOK_SCRIPT="/tmp/jack_repo/Patches/susfs_inline_hook_patches.sh"
-
-if [ -f "$INLINE_HOOK_SCRIPT" ]; then
-    echo "Script trouvé : $INLINE_HOOK_SCRIPT"
-    chmod +x "$INLINE_HOOK_SCRIPT"
-    
-    bash "$INLINE_HOOK_SCRIPT" 2>&1 | tee /tmp/inline_hook.log
-    
-    echo ""
-    echo "=== Résumé des hooks appliqués ==="
-    grep -E "\[\+\].*Patched|\[-\].*failed|\[-\].*Skipped|Warning.*contains" /tmp/inline_hook.log | head -40 || true
-    
-    if grep -q "kernel/reboot.c Patched" /tmp/inline_hook.log; then
-        echo "✅ kernel/reboot.c patché par JackA1ltman"
-    else
-        echo "❌ kernel/reboot.c NON patché par JackA1ltman"
-    fi
-    
-    if grep -q "kernel/sys.c Patched" /tmp/inline_hook.log; then
-        echo "✅ kernel/sys.c patché par JackA1ltman"
-    else
-        echo "❌ kernel/sys.c NON patché par JackA1ltman"
-    fi
-else
-    echo "❌ Script d'inline hooks introuvable à $INLINE_HOOK_SCRIPT"
-    exit 1
-fi
-
-# ==================== 5. CONFIGURATION (KernelSU-Next Manual Hooks) ====================
-echo ""
-echo "=== Configuration (KernelSU-Next Manual Hooks + SUSFS) ==="
+echo "=== Configuration (KernelSU-Next Manual Hook, sans SUSFS) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -263,7 +238,7 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU=y"
   echo "CONFIG_KSU_MANUAL_HOOK=y"
   echo "# CONFIG_KSU_WITH_KPROBES is not set"
-  echo "CONFIG_KSU_SUSFS=y"
+  echo "# CONFIG_KSU_SUSFS is not set"
   echo "# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set"
   echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
   echo "CONFIG_KPROBES=y"
@@ -278,20 +253,20 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -5
 
 echo "=== État final .config ==="
-grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_WITH_KPROBES|KSU_TRACEPOINT|KSU_TAMPER|KPROBES|SECCOMP" out/.config | head -20 || true
+grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_WITH_KPROBES|KSU_TRACEPOINT|KSU_TAMPER|SECCOMP" out/.config | head -20 || true
 
-if ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
-    echo "❌ CONFIG_KSU_SUSFS non activé, abandon"
+if ! grep -q "^CONFIG_KSU=y" out/.config; then
+    echo "❌ CONFIG_KSU non activé, abandon"
     exit 1
 fi
 
-# ==================== 6. PATCHS MOTOROLA ====================
+# ==================== 5. PATCHS MOTOROLA ====================
 echo "=== Patch signatures + tactile ==="
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
 printf "\n/* --- Début Patch Tactile --- */\n#include <linux/notifier.h>\n#include <linux/module.h>\nstatic BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);\nint panel_register_notifier(struct notifier_block *nb) {\n    return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb);\n}\nEXPORT_SYMBOL(panel_register_notifier);\nint panel_unregister_notifier(struct notifier_block *nb) {\n    return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb);\n}\nEXPORT_SYMBOL(panel_unregister_notifier);\nvoid touch_set_state(int state) { return; }\nEXPORT_SYMBOL(touch_set_state);\n/* --- Fin Patch Tactile --- */\n" >> techpack/display/msm/msm_drv.c
 echo "✅ Patchs Motorola appliqués"
 
-# ==================== 7. COMPILATION KERNEL ====================
+# ==================== 6. COMPILATION KERNEL ====================
 echo "=== Compilation du kernel ==="
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 -j$(nproc) Image 2>&1 | tee build.log
 if [ -f "out/arch/arm64/boot/Image" ]; then
@@ -304,7 +279,7 @@ else
     exit 1
 fi
 
-# ==================== 8. COMPILATION KSUD (KernelSU-Next) ====================
+# ==================== 7. COMPILATION KSUD (KernelSU-Next) ====================
 echo ""
 echo "=== Compilation ksud (KernelSU-Next) ==="
 cd "$GITHUB_WORKSPACE"
@@ -338,7 +313,7 @@ cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
 echo "✅ ksud compilé (KernelSU-Next)"
 cd "$GITHUB_WORKSPACE"
 
-# ==================== 9. REPACK (MÉTHODE BACKSLASHXX) ====================
+# ==================== 8. REPACK (MÉTHODE BACKSLASHXX) ====================
 echo ""
 echo "=== Repack (méthode backslashxx : magiskboot cpio add) ==="
 
@@ -385,7 +360,7 @@ rm -f ./local_su_binary 2>/dev/null || true
 mv new-boot.img ../final_boot.img
 cd ..
 
-# ==================== 10. DIAGNOSTIC ====================
+# ==================== 9. DIAGNOSTIC ====================
 echo ""
 echo "=== DIAGNOSTIC ==="
 mkdir -p verify; cd verify
@@ -406,12 +381,12 @@ if [ -f "ramdisk.cpio" ]; then
 fi
 cd ..
 
-# ==================== 11. SORTIE ====================
+# ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-SUSFS-v1-boot.img
+cp final_boot.img output/KernelSU-Next-NoSUSFS-v2-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v1 ==="
+echo "=== BUILD TERMINÉ v2 (KernelSU-Next sans SUSFS) ==="
 ls -lh output/
