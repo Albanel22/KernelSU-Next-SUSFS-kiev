@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # =============================================================================
-# V2.3 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS) [FIX FINAL]
+# V2.4 : KernelSU-Next (legacy) + 5 Patchs Manuels (SANS SUSFS) [FIX CHIRURGICAL]
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.3 ==="
+echo "=== Build KernelSU-Next (legacy, sans SUSFS) v2.4 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -137,9 +137,9 @@ if [ -n "$FILES_ANON_INODE" ]; then
     done
 fi
 
-# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (REGEX BLINDÉE) ====================
+# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (CHIRURGICAL) ====================
 echo ""
-echo "=== Application des 5 Patchs Manuels KernelSU-Next (Regex Blindée) ==="
+echo "=== Application des 5 Patchs Manuels KernelSU-Next ==="
 
 python3 << 'PYEOF'
 import re
@@ -162,7 +162,6 @@ else:
 with open('fs/open.c', 'r') as f: content = f.read()
 if 'ksu_handle_faccessat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
-    # On cherche do_faccessat qui est la vraie fonction de logique
     content = re.sub(r'(long\s+do_faccessat\s*\()', extern + r'\1', content)
     
     call = "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\t"
@@ -173,18 +172,31 @@ if 'ksu_handle_faccessat' not in content:
 else:
     print("✅ fs/open.c déjà patché")
 
-# 3. fs/read_write.c
+# 3. fs/read_write.c (CHIRURGICAL)
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
-    # La virgule après read est cruciale pour ne pas matcher readv ou readlink
-    content = re.sub(r'(SYSCALL_DEFINE3\s*\(\s*read\s*,)', extern + r'\1', content)
     
-    call = "#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif"
-    content = re.sub(r'(struct\s+fd\s+f\s*=\s*fdget_pos\(fd\);\s*\n\s*ssize_t\s+ret\s*=\s*-EBADF;)', r'\1\n\n' + call, content)
-    
-    with open('fs/read_write.c', 'w') as f: f.write(content)
-    print("✅ fs/read_write.c patché")
+    # 1. Ajouter l'extern juste avant SYSCALL_DEFINE3(read,
+    match = re.search(r'(SYSCALL_DEFINE3\s*\(\s*read\s*,)', content)
+    if match:
+        content = content[:match.start()] + extern + content[match.start():]
+        
+        # 2. Trouver "ssize_t ret = -EBADF;" DANS cette fonction et injecter l'appel
+        start_pos = content.find('SYSCALL_DEFINE3(read,')
+        ret_pos = content.find('ssize_t ret = -EBADF;', start_pos)
+        
+        if ret_pos != -1:
+            call = "\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, &buf, &count);\n#endif"
+            insert_pos = ret_pos + len('ssize_t ret = -EBADF;')
+            content = content[:insert_pos] + call + content[insert_pos:]
+            
+            with open('fs/read_write.c', 'w') as f: f.write(content)
+            print("✅ fs/read_write.c patché (chirurgical)")
+        else:
+            print("❌ Impossible de trouver 'ssize_t ret = -EBADF;' dans read")
+    else:
+        print("❌ Impossible de trouver 'SYSCALL_DEFINE3(read,'")
 else:
     print("✅ fs/read_write.c déjà patché")
 
@@ -375,10 +387,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.3-boot.img
+cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.4-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.3 (KernelSU-Next sans SUSFS) ==="
+echo "=== BUILD TERMINÉ v2.4 (KernelSU-Next sans SUSFS) ==="
 ls -lh output/
