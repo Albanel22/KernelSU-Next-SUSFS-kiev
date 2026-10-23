@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + ksud (dev)
+# V3.0 : KernelSU-Next (dev) + Hooks Manuels + Backport path_umount + ksud (dev)
 # Testé pour noyau 4.19 - Motorola One 5G Ace (kiev)
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy) pour noyau 4.19 ==="
+echo "=== Build KernelSU-Next (dev) pour noyau 4.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -28,17 +28,22 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION KernelSU-Next (legacy) ====================
-echo "=== Intégration KernelSU-Next (legacy) ==="
+# ==================== 2. INTÉGRATION KernelSU-Next (depuis la branche dev) ====================
+echo "=== Intégration KernelSU-Next (dev) ==="
 rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
-# La branche 'legacy' est celle prévue pour les noyaux non-GKI (4.14+)
-curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+# 1. Cloner la branche dev
+git clone --depth=1 --branch dev https://github.com/KernelSU-Next/KernelSU-Next.git /tmp/ksu-dev
+# 2. Utiliser le script d'initialisation pour la branche dev
+# (La branche dev utilise init_kernelsu.sh au lieu de setup.sh legacy)
+bash /tmp/ksu-dev/kernel/tools/init_kernelsu.sh .
+# 3. Nettoyer les dossiers temporaires
+rm -rf /tmp/ksu-dev
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration KernelSU-Next"; exit 1
 fi
-echo "✅ KernelSU-Next (legacy) intégré"
+echo "✅ KernelSU-Next (dev) intégré"
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -180,7 +185,6 @@ if 'ksu_handle_sys_read' not in content:
         start_pos = content.find('SYSCALL_DEFINE3(read,')
         ret_pos = content.find('ssize_t ret = -EBADF;', start_pos)
         if ret_pos != -1:
-            # Le cast (char __user **) est crucial pour le noyau 4.19
             call = "\n\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, (char __user **)&buf, &count);\n#endif"
             insert_pos = ret_pos + len('ssize_t ret = -EBADF;')
             content = content[:insert_pos] + call + content[insert_pos:]
@@ -426,10 +430,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.7-boot.img
+cp final_boot.img output/KernelSU-Next-Dev-v3.0-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.7 (KernelSU-Next sans SUSFS) ==="
+echo "=== BUILD TERMINÉ v3.0 (KernelSU-Next dev) ==="
 ls -lh output/
