@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================================================================
-# V3.0 : KernelSU-Next (dev) + Hooks Manuels + Backport path_umount + ksud (dev)
+# V3.1 : KernelSU-Next (dev) + Hooks Manuels + Backport path_umount + ksud (dev)
 # Testé pour noyau 4.19 - Motorola One 5G Ace (kiev)
 # =============================================================================
 
@@ -34,27 +34,30 @@ rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
 # 1. Cloner la branche dev
 git clone --depth=1 --branch dev https://github.com/KernelSU-Next/KernelSU-Next.git /tmp/ksu-dev
-# 2. Utiliser le script d'initialisation pour la branche dev
-# (La branche dev utilise init_kernelsu.sh au lieu de setup.sh legacy)
-bash /tmp/ksu-dev/kernel/tools/init_kernelsu.sh .
-# 3. Nettoyer les dossiers temporaires
+# 2. Copier le code noyau dans l'arborescence du noyau
+cp -r /tmp/ksu-dev/kernel drivers/kernelsu
+# 3. Nettoyer le dossier temporaire
 rm -rf /tmp/ksu-dev
 
-if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
+if [ ! -d "drivers/kernelsu" ]; then
     echo "❌ Échec intégration KernelSU-Next"; exit 1
 fi
 echo "✅ KernelSU-Next (dev) intégré"
 
-if [ -d "drivers/kernelsu" ]; then
-    KSU_DIR="drivers/kernelsu"
-elif [ -d "KernelSU/kernel" ]; then
-    KSU_DIR="KernelSU/kernel"
-else
-    KSU_DIR="KernelSU"
-fi
+KSU_DIR="drivers/kernelsu"
 echo "KSU_DIR : $KSU_DIR"
 
-# ==================== 2e. NEUTRALISATION CHECK.MK ====================
+# ==================== 2e. INTÉGRATION DANS LE BUILD DU NOYAU ====================
+echo "=== Ajout de KernelSU-Next au Makefile et Kconfig ==="
+if ! grep -q "kernelsu" drivers/Makefile; then
+    echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+fi
+if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
+    sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+fi
+echo "✅ Makefile et Kconfig mis à jour"
+
+# ==================== 2f. NEUTRALISATION CHECK.MK ====================
 echo ""
 echo "=== Neutralisation check.mk ==="
 for pattern in susfs_compat.mk inline_hook_check.mk manual_hook_check.mk tracepoint_hook_check.mk kprobe_check.mk; do
@@ -339,7 +342,6 @@ export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
 rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-# On clone la branche 'dev' qui contient le dossier userspace/ksud
 git clone --depth=1 --branch dev https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
 cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
 mkdir -p .cargo
@@ -430,10 +432,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-Dev-v3.0-boot.img
+cp final_boot.img output/KernelSU-Next-Dev-v3.1-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.0 (KernelSU-Next dev) ==="
+echo "=== BUILD TERMINÉ v3.1 (KernelSU-Next dev) ==="
 ls -lh output/
