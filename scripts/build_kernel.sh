@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# V3.1 : KernelSU-Next (dev) + Hooks Manuels + Backport path_umount + ksud (dev)
-# Testé pour noyau 4.19 - Motorola One 5G Ace (kiev)
+# V3.2 : KernelSU-Next (dev) + Hooks Manuels + Backport path_umount + ksud (dev)
+# Correction de l'include uapi/app_profile.h
 # =============================================================================
 
 echo "=== Build KernelSU-Next (dev) pour noyau 4.19 ==="
@@ -34,21 +34,28 @@ rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
 
 # 1. Cloner la branche dev
 git clone --depth=1 --branch dev https://github.com/KernelSU-Next/KernelSU-Next.git /tmp/ksu-dev
-# 2. Copier le code noyau dans l'arborescence du noyau
-cp -r /tmp/ksu-dev/kernel drivers/kernelsu
+# 2. Copier le code noyau ET les en-têtes UAPI dans drivers/kernelsu
+mkdir -p drivers/kernelsu
+cp -r /tmp/ksu-dev/kernel/* drivers/kernelsu/
+cp -r /tmp/ksu-dev/uapi drivers/kernelsu/uapi
 # 3. Nettoyer le dossier temporaire
 rm -rf /tmp/ksu-dev
 
-if [ ! -d "drivers/kernelsu" ]; then
-    echo "❌ Échec intégration KernelSU-Next"; exit 1
+if [ ! -d "drivers/kernelsu" ] || [ ! -f "drivers/kernelsu/uapi/app_profile.h" ]; then
+    echo "❌ Échec intégration KernelSU-Next (uapi manquant)"; exit 1
 fi
-echo "✅ KernelSU-Next (dev) intégré"
+echo "✅ KernelSU-Next (dev) intégré (kernel + uapi)"
 
 KSU_DIR="drivers/kernelsu"
 echo "KSU_DIR : $KSU_DIR"
 
 # ==================== 2e. INTÉGRATION DANS LE BUILD DU NOYAU ====================
 echo "=== Ajout de KernelSU-Next au Makefile et Kconfig ==="
+# Ajout du flag d'inclusion pour que #include "uapi/app_profile.h" fonctionne
+if ! grep -q "drivers/kernelsu" drivers/kernelsu/Makefile; then
+    sed -i '1i ccflags-y += -I$(srctree)/drivers/kernelsu' drivers/kernelsu/Makefile
+fi
+
 if ! grep -q "kernelsu" drivers/Makefile; then
     echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
 fi
@@ -432,10 +439,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-Dev-v3.1-boot.img
+cp final_boot.img output/KernelSU-Next-Dev-v3.2-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.1 (KernelSU-Next dev) ==="
+echo "=== BUILD TERMINÉ v3.2 (KernelSU-Next dev) ==="
 ls -lh output/
