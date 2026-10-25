@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v3.2 : Mode apply forcé + Correcteur automatique Python pour les hunks SuSFS
+# v3.3 : Ajout de l'injection Kconfig pour SuSFS (résout l'abandon olddefconfig)
 # =============================================================================
 
 KSU_REF="${KSU_REF:-legacy}"
@@ -12,7 +12,7 @@ KSUD_FALLBACK_REF="${KSUD_FALLBACK_REF:-v3.4.2}"
 KSU_COMMIT="${KSU_COMMIT:-465490a}"
 KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"
 
-# --- SuSFS (forcé en apply avec correcteur) ---
+# --- SuSFS ---
 SUSFS_MODE="${SUSFS_MODE:-apply}"
 SUSFS_PATCH_URL="${SUSFS_PATCH_URL:-https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/raw/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch}"
 SUSFS_OPTIONS="${SUSFS_OPTIONS:-SUS_PATH SUS_MOUNT SUS_KSTAT SUS_MAP OPEN_REDIRECT SPOOF_UNAME SPOOF_CMDLINE_OR_BOOTCONFIG ENABLE_LOG HIDE_KSU_SUSFS_SYMBOLS}"
@@ -81,7 +81,7 @@ for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/ker
     if [ -d "$d" ]; then KSU_REPO_ROOT="$d"; break; fi
 done
 
-# ==================== 2s. SuSFS (Application + Correcteur Python) ====================
+# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig) ====================
 if [ "$SUSFS_MODE" != "off" ]; then
     echo ""
     echo "=== SuSFS (mode : $SUSFS_MODE) ==="
@@ -98,31 +98,19 @@ if [ "$SUSFS_MODE" != "off" ]; then
 import os
 
 def fix_file(path, target, addition):
-    if not os.path.exists(path):
-        print(f"⚠️ {path} introuvable")
-        return
-    content = path.read_text() if hasattr(path, 'read_text') else open(path, 'r').read()
+    if not os.path.exists(path): return
+    content = open(path, 'r').read()
     if addition.strip() not in content:
         if target in content:
             content = content.replace(target, target + '\n' + addition, 1)
         else:
             content += '\n' + addition
-        with open(path, 'w') as f:
-            f.write(content)
-        print(f"✅ {path} corrigé/patché pour SuSFS")
-    else:
-        print(f"✅ {path} déjà à jour pour SuSFS")
+        with open(path, 'w') as f: f.write(content)
 
-# 1. fs/Makefile
 fix_file('fs/Makefile', 'obj-y :=', 'obj-$(CONFIG_KSU_SUSFS) += susfs.o')
-
-# 2. fs/super.c
 fix_file('fs/super.c', '#include <linux/fs_context.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif')
-
-# 3. mm/memory.c
 fix_file('mm/memory.c', '#include <linux/pgtable.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif')
 
-# 4. fs/namespace.c
 ns_content = open('fs/namespace.c', 'r').read()
 if 'susfs_def.h' not in ns_content:
     ns_content = ns_content.replace('#include <linux/fs_context.h>', '#include <linux/fs_context.h>\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif', 1)
@@ -141,9 +129,7 @@ if 'susfs_alloc_non_unshare_ksu_vfsmnt' not in ns_content:
     replacement = mount_hook + '\n\t' + target_mount + '\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow_susfs:\n#endif'
     ns_content = ns_content.replace(target_mount, replacement, 1)
 with open('fs/namespace.c', 'w') as f: f.write(ns_content)
-print("✅ fs/namespace.c vérifié/corrigé")
 
-# 5. fs/proc/task_mmu.c
 tmu_content = open('fs/proc/task_mmu.c', 'r').read()
 if 'SUSFS_IS_INODE_SUS_MAP' not in tmu_content:
     target_pagemap = 'ret = walk_page_range(start_vaddr, end, &pagemap_walk);'
@@ -158,14 +144,67 @@ if 'SUSFS_IS_INODE_SUS_MAP' not in tmu_content:
     replacement_map = map_hook + '\n\t' + target_pagemap + map_end
     tmu_content = tmu_content.replace(target_pagemap, replacement_map, 1)
     with open('fs/proc/task_mmu.c', 'w') as f: f.write(tmu_content)
-    print("✅ fs/proc/task_mmu.c corrigé pour SuSFS")
 PYEOF
 
-    for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
-        if [ -f "$f" ]; then echo "  ✅ $f présent"; else echo "  ⚠️  $f absent"; fi
-    done
+    # --- Injection des symboles Kconfig SuSFS pour éviter qu'ils soient purgés ---
+    KCONFIG_FILE="$KSU_DIR/Kconfig"
+    if [ -f "$KCONFIG_FILE" ] && ! grep -q "CONFIG_KSU_SUSFS" "$KCONFIG_FILE"; then
+        echo "=== Injection des Kconfig SuSFS dans $KCONFIG_FILE ==="
+        cat >> "$KCONFIG_FILE" << 'EOF'
+
+config KSU_SUSFS
+	bool "SuSFS support for KernelSU"
+	default y
+
+config KSU_SUSFS_SUS_PATH
+	bool "Enable sus_path"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_MOUNT
+	bool "Enable sus_mount"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_KSTAT
+	bool "Enable sus_kstat"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SUS_MAP
+	bool "Enable sus_map"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_OPEN_REDIRECT
+	bool "Enable open_redirect"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SPOOF_UNAME
+	bool "Enable spoof_uname"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	bool "Enable spoof_cmdline_or_bootconfig"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_ENABLE_LOG
+	bool "Enable susfs log"
+	depends on KSU_SUSFS
+	default y
+
+config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+	bool "Hide ksu susfs symbols"
+	depends on KSU_SUSFS
+	default y
+EOF
+    fi
+
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué et validé avec succès"
+    echo "✅ SuSFS appliqué, corrigé et enregistré dans Kconfig"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -179,12 +218,10 @@ for pattern in susfs_compat.mk inline_hook_check.mk manual_hook_check.mk tracepo
 done
 
 # ==================== 2b. NETTOYAGE UNICODE ====================
-echo "=== Nettoyage Unicode ==="
 python3 << 'PYEOF'
 import os
 from pathlib import Path
-UNICODE_SPACES = ['\u00A0', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005',
-    '\u2006', '\u2007', '\u2008', '\u2009', '\u200A', '\u200B', '\u202F', '\u205F', '\u3000']
+UNICODE_SPACES = ['\u00A0', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200A', '\u200B', '\u202F', '\u205F', '\u3000']
 for root, dirs, files in os.walk('.'):
     if 'KernelSU' not in root and 'kernelsu' not in root: continue
     for file in files:
@@ -199,7 +236,6 @@ for root, dirs, files in os.walk('.'):
 PYEOF
 
 # ==================== 2c. FIX symbol_resolver.h & EXPORTS ====================
-echo "=== Fix symbol_resolver.h & SELinux ==="
 for h in "$KSU_DIR/infra/symbol_resolver.h" "$KSU_DIR/kernel/infra/symbol_resolver.h"; do
     if [ -f "$h" ]; then
         sed -i 's|^static inline void \*ksu_resolve_symbol_for_functable_hook|// static inline void *ksu_resolve_symbol_for_functable_hook|' "$h"
@@ -224,7 +260,6 @@ done
     sed -i 's/^static struct security_operations selinux_ops/struct security_operations selinux_ops/' security/selinux/hooks.c
 }
 
-# ==================== 2e. FIX O_CLOEXEC ====================
 FILES_GET_UNUSED=$(grep -rl "get_unused_fd_flags(O_CLOEXEC)" "$KSU_DIR/" 2>/dev/null || true)
 [ -n "$FILES_GET_UNUSED" ] && for f in $FILES_GET_UNUSED; do sed -i 's/get_unused_fd_flags(O_CLOEXEC)/get_unused_fd_flags(0)/g' "$f"; done
 
@@ -236,11 +271,9 @@ FILES_ANON_INODE=$(grep -rl "anon_inode_getfile" "$KSU_DIR/" 2>/dev/null || true
 done
 
 # ==================== 3. PATCHS MANUELS KERNELSU-NEXT ====================
-echo "=== Application des 5 Patchs Manuels KernelSU-Next ==="
 python3 << 'PYEOF'
 import re
 
-# 1. fs/exec.c
 with open('fs/exec.c', 'r') as f: content = f.read()
 if 'ksu_handle_execveat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\n\n"
@@ -249,7 +282,6 @@ if 'ksu_handle_execveat' not in content:
     content = re.sub(r'(\treturn\s+do_execveat_common\(AT_FDCWD,\s*filename,\s*argv,\s*envp,\s*0\);)', call + r'\1', content, count=1)
     with open('fs/exec.c', 'w') as f: f.write(content)
 
-# 2. fs/open.c
 with open('fs/open.c', 'r') as f: content = f.read()
 if 'ksu_handle_faccessat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n\n"
@@ -258,7 +290,6 @@ if 'ksu_handle_faccessat' not in content:
     content = re.sub(r'(\tif\s*\(mode\s*&\s*~S_IRWXO\))', call + r'\1', content, count=1)
     with open('fs/open.c', 'w') as f: f.write(content)
 
-# 3. fs/read_write.c
 with open('fs/read_write.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_read' not in content:
     extern = "#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif\n\n"
@@ -272,7 +303,6 @@ if 'ksu_handle_sys_read' not in content:
             content = content[:ret_pos + len('ssize_t ret = -EBADF;')] + call + content[ret_pos + len('ssize_t ret = -EBADF;'):]
             with open('fs/read_write.c', 'w') as f: f.write(content)
 
-# 4. fs/stat.c
 with open('fs/stat.c', 'r') as f: content = f.read()
 if 'ksu_handle_stat' not in content:
     extern = "#ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\n\n"
@@ -281,7 +311,6 @@ if 'ksu_handle_stat' not in content:
     content = re.sub(r'(\terror\s*=\s*vfs_fstatat\(dfd,\s*filename,\s*&stat,\s*flag\);)', call + r'\1', content, count=1)
     with open('fs/stat.c', 'w') as f: f.write(content)
 
-# 5. kernel/reboot.c
 with open('kernel/reboot.c', 'r') as f: content = f.read()
 if 'ksu_handle_sys_reboot' not in content:
     extern = "#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
@@ -290,7 +319,6 @@ if 'ksu_handle_sys_reboot' not in content:
     content = re.sub(r'(/\*\s*We only trust the superuser with rebooting the system\.\s*\*/)', call + r'\1', content, count=1)
     with open('kernel/reboot.c', 'w') as f: f.write(content)
 
-# 6. fs/namespace.c (Backport path_umount)
 with open('fs/namespace.c', 'r') as f: content = f.read()
 if 'int path_umount(struct path *path, int flags)' not in content:
     backport = '''
@@ -319,7 +347,6 @@ int path_umount(struct path *path, int flags)
 '''
     content = re.sub(r'(int ksys_umount\(char __user \*name, int flags\))', backport + r'\1', content, count=1)
     with open('fs/namespace.c', 'w') as f: f.write(content)
-print("✅ Patchs manuels KSU appliqués")
 PYEOF
 
 # ==================== 4. CONFIGURATION ====================
@@ -458,10 +485,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.2-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v3.3-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.2 (KernelSU-Next $KSU_REF + SuSFS appliqué) ==="
+echo "=== BUILD TERMINÉ v3.3 (KernelSU-Next + SuSFS Kconfig injecté) ==="
 ls -lh output/
