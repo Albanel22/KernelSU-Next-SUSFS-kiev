@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v3.8 : Vérification de l'existence de fs/susfs.c et forçage de compilation
+# v3.9 : Forçage de la macro CONFIG_KSU_SUSFS dans fs/Makefile pour susfs.o
 # =============================================================================
 
 KSU_REF="${KSU_REF:-legacy}"
@@ -81,7 +81,7 @@ for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/ker
     if [ -d "$d" ]; then KSU_REPO_ROOT="$d"; break; fi
 done
 
-# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig + Makefile Forcé) ====================
+# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig + Flags Makefile) ====================
 if [ "$SUSFS_MODE" != "off" ]; then
     echo ""
     echo "=== SuSFS (mode : $SUSFS_MODE) ==="
@@ -93,7 +93,7 @@ if [ "$SUSFS_MODE" != "off" ]; then
     set -e
     rm -f $(find . -name "*.rej") 2>/dev/null || true
 
-    echo "--- Correcteur Python SuSFS (forçage compilation susfs.o et headers) ---"
+    echo "--- Correcteur Python SuSFS (forçage compilation et macro C) ---"
     python3 << 'PYEOF'
 import os
 
@@ -107,11 +107,12 @@ def fix_file(path, target, addition):
             content += '\n' + addition
         with open(path, 'w') as f: f.write(content)
 
-# Forcer l'ajout de susfs.o dans obj-y au début de fs/Makefile
+# Forcer l'ajout de susfs.o et des drapeaux de macro dans fs/Makefile
 with open('fs/Makefile', 'r') as f:
     mf_content = f.read()
 if 'susfs.o' not in mf_content:
-    mf_content = mf_content.replace('obj-y :=', 'obj-y += susfs.o\nobj-y :=', 1)
+    susfs_rule = 'obj-y += susfs.o\nccflags-y += -DCONFIG_KSU_SUSFS=1\n'
+    mf_content = mf_content.replace('obj-y :=', susfs_rule + 'obj-y :=', 1)
     with open('fs/Makefile', 'w') as f:
         f.write(mf_content)
 
@@ -154,7 +155,6 @@ if 'SUSFS_IS_INODE_SUS_MAP' not in tmu_content:
     with open('fs/proc/task_mmu.c', 'w') as f: f.write(tmu_content)
 PYEOF
 
-    # --- Vérification critique de l'existence des fichiers SuSFS ---
     for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
         if [ -f "$f" ]; then
             echo "  ✅ $f présent"
@@ -221,7 +221,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué, vérifié et enregistré avec succès"
+    echo "✅ SuSFS appliqué, forcé et validé v3.9"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -502,10 +502,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.8-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v3.9-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.8 (KernelSU-Next + SuSFS vérifié v3.8) ==="
+echo "=== BUILD TERMINÉ v3.9 (KernelSU-Next + SuSFS ccflags-y forcé) ==="
 ls -lh output/
