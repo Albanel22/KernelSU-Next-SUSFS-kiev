@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v3.4 : Ajout du correcteur Python pour fs/stat.c (résout l'erreur STATX_SUS_KSTAT)
+# v3.5 : Correction de l'inclusion de susfs.o en fin de fs/Makefile (résout les symboles undefined)
 # =============================================================================
 
 KSU_REF="${KSU_REF:-legacy}"
@@ -81,7 +81,7 @@ for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/ker
     if [ -d "$d" ]; then KSU_REPO_ROOT="$d"; break; fi
 done
 
-# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig) ====================
+# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig + Makefile) ====================
 if [ "$SUSFS_MODE" != "off" ]; then
     echo ""
     echo "=== SuSFS (mode : $SUSFS_MODE) ==="
@@ -93,7 +93,7 @@ if [ "$SUSFS_MODE" != "off" ]; then
     set -e
     rm -f $(find . -name "*.rej") 2>/dev/null || true
 
-    echo "--- Correcteur Python SuSFS (garantie d'intégration des fichiers clés) ---"
+    echo "--- Correcteur Python SuSFS (inclusion fs/Makefile et headers) ---"
     python3 << 'PYEOF'
 import os
 
@@ -107,11 +107,12 @@ def fix_file(path, target, addition):
             content += '\n' + addition
         with open(path, 'w') as f: f.write(content)
 
-fix_file('fs/Makefile', 'obj-y :=', 'obj-$(CONFIG_KSU_SUSFS) += susfs.o')
+# Forcer l'ajout de susfs.o à la fin de fs/Makefile pour s'assurer qu'il est compilé et lié
+with open('fs/Makefile', 'a') as f:
+    f.write('\nobj-$(CONFIG_KSU_SUSFS) += susfs.o\n')
+
 fix_file('fs/super.c', '#include <linux/fs_context.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif')
 fix_file('mm/memory.c', '#include <linux/pgtable.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif')
-
-# Correction critique pour fs/stat.c (inclusion de linux/susfs.h et linux/susfs_def.h)
 fix_file('fs/stat.c', '#include <linux/syscalls.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif')
 
 ns_content = open('fs/namespace.c', 'r').read()
@@ -206,7 +207,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué, corrigé (incluant fs/stat.c) et enregistré dans Kconfig"
+    echo "✅ SuSFS appliqué, fs/Makefile mis à jour et Kconfig enregistré"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -444,7 +445,7 @@ EOF
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 cargo +nightly build --release --target aarch64-linux-android
 
-KSUD_BINARY=$(find "$KSUD_ROOT" -type f -path "*aarch64-linux-android/release/ksud" 2>/dev/null | head -1 || true)
+KSUD_BINARY=$(find "$KSUD_ROOT" -type f -path "*aarch64-linux-android/release/ksud" 2>/dev/null || true)
 cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
 cd "$GITHUB_WORKSPACE"
 
@@ -487,10 +488,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.4-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v3.5-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.4 (KernelSU-Next + SuSFS fs/stat.c corrigé) ==="
+echo "=== BUILD TERMINÉ v3.5 (KernelSU-Next + SuSFS Makefile corrigé) ==="
 ls -lh output/
