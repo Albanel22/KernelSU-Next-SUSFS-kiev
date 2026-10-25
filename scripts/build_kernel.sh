@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v3.6 : Correction de l'injection de susfs.o au début de fs/Makefile (compilation effective)
+# v3.7 : Forçage inconditionnel de susfs.o dans fs/Makefile pour résoudre les symboles non définis
 # =============================================================================
 
 KSU_REF="${KSU_REF:-legacy}"
@@ -81,7 +81,7 @@ for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/ker
     if [ -d "$d" ]; then KSU_REPO_ROOT="$d"; break; fi
 done
 
-# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig + Makefile) ====================
+# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig + Makefile Forcé) ====================
 if [ "$SUSFS_MODE" != "off" ]; then
     echo ""
     echo "=== SuSFS (mode : $SUSFS_MODE) ==="
@@ -93,7 +93,7 @@ if [ "$SUSFS_MODE" != "off" ]; then
     set -e
     rm -f $(find . -name "*.rej") 2>/dev/null || true
 
-    echo "--- Correcteur Python SuSFS (correction position Makefile et headers) ---"
+    echo "--- Correcteur Python SuSFS (forçage compilation susfs.o et headers) ---"
     python3 << 'PYEOF'
 import os
 
@@ -107,11 +107,11 @@ def fix_file(path, target, addition):
             content += '\n' + addition
         with open(path, 'w') as f: f.write(content)
 
-# CORRECTION CLÉ : Insérer obj-$(CONFIG_KSU_SUSFS) au début de fs/Makefile (avant obj-y)
+# FORÇAGE ABSOLU : Ajouter susfs.o directement dans obj-y de fs/Makefile pour garantir sa compilation
 with open('fs/Makefile', 'r') as f:
     mf_content = f.read()
 if 'susfs.o' not in mf_content:
-    mf_content = mf_content.replace('obj-y :=', 'obj-$(CONFIG_KSU_SUSFS) += susfs.o\nobj-y :=', 1)
+    mf_content = mf_content.replace('obj-y :=', 'obj-y += susfs.o\nobj-y :=', 1)
     with open('fs/Makefile', 'w') as f:
         f.write(mf_content)
 
@@ -211,7 +211,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué, fs/Makefile corrigé (susfs.o en tête) et Kconfig enregistré"
+    echo "✅ SuSFS appliqué, susfs.o forcé dans fs/Makefile et Kconfig enregistré"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -492,10 +492,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.6-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v3.7-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.6 (KernelSU-Next + SuSFS Makefile en tête) ==="
+echo "=== BUILD TERMINÉ v3.7 (KernelSU-Next + SuSFS susfs.o forcé dans obj-y) ==="
 ls -lh output/
