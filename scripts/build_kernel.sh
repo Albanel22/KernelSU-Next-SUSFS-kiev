@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v3.3 : Ajout de l'injection Kconfig pour SuSFS (résout l'abandon olddefconfig)
+# v3.4 : Ajout du correcteur Python pour fs/stat.c (résout l'erreur STATX_SUS_KSTAT)
 # =============================================================================
 
 KSU_REF="${KSU_REF:-legacy}"
@@ -93,7 +93,7 @@ if [ "$SUSFS_MODE" != "off" ]; then
     set -e
     rm -f $(find . -name "*.rej") 2>/dev/null || true
 
-    echo "--- Correcteur Python SuSFS (garantie d'intégration des 5 fichiers) ---"
+    echo "--- Correcteur Python SuSFS (garantie d'intégration des fichiers clés) ---"
     python3 << 'PYEOF'
 import os
 
@@ -110,6 +110,9 @@ def fix_file(path, target, addition):
 fix_file('fs/Makefile', 'obj-y :=', 'obj-$(CONFIG_KSU_SUSFS) += susfs.o')
 fix_file('fs/super.c', '#include <linux/fs_context.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif')
 fix_file('mm/memory.c', '#include <linux/pgtable.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif')
+
+# Correction critique pour fs/stat.c (inclusion de linux/susfs.h et linux/susfs_def.h)
+fix_file('fs/stat.c', '#include <linux/syscalls.h>', '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif')
 
 ns_content = open('fs/namespace.c', 'r').read()
 if 'susfs_def.h' not in ns_content:
@@ -146,10 +149,9 @@ if 'SUSFS_IS_INODE_SUS_MAP' not in tmu_content:
     with open('fs/proc/task_mmu.c', 'w') as f: f.write(tmu_content)
 PYEOF
 
-    # --- Injection des symboles Kconfig SuSFS pour éviter qu'ils soient purgés ---
+    # --- Injection des symboles Kconfig SuSFS ---
     KCONFIG_FILE="$KSU_DIR/Kconfig"
     if [ -f "$KCONFIG_FILE" ] && ! grep -q "CONFIG_KSU_SUSFS" "$KCONFIG_FILE"; then
-        echo "=== Injection des Kconfig SuSFS dans $KCONFIG_FILE ==="
         cat >> "$KCONFIG_FILE" << 'EOF'
 
 config KSU_SUSFS
@@ -204,7 +206,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué, corrigé et enregistré dans Kconfig"
+    echo "✅ SuSFS appliqué, corrigé (incluant fs/stat.c) et enregistré dans Kconfig"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -485,10 +487,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.3-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v3.4-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.3 (KernelSU-Next + SuSFS Kconfig injecté) ==="
+echo "=== BUILD TERMINÉ v3.4 (KernelSU-Next + SuSFS fs/stat.c corrigé) ==="
 ls -lh output/
