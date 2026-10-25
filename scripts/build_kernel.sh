@@ -2,11 +2,39 @@
 set -euo pipefail
 
 # =============================================================================
-# KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + ksud (dev)
-# Testé pour noyau 4.19 - Motorola One 5G Ace (kiev)
+# KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + ksud aligné
+# Noyau 4.19 - Motorola One 5G Ace (kiev)
+# v3.0 : SuSFS optionnel (patch JackA1ltman susfs_patch_to_4.19) en 3 modes :
+#        off (comme v2.9) | probe (diagnostic + essai à blanc, sans compiler) | apply
+# v2.9 : driver épinglé sur le commit PARENT du commit preinit (UAPI 5, compatible
+#        avec le manager v3.4.2) + ksud depuis le tag v3.4.2 + garde-fou UAPI
+# v2.8 : ref KernelSU-Next épinglable (KSU_REF) + ksud compilé depuis le même
+#        checkout que le driver (fallback dev seulement si absent)
 # =============================================================================
 
-echo "=== Build KernelSU-Next (legacy) pour noyau 4.19 ==="
+# Branche ou tag de KernelSU-Next pour le DRIVER (et ksud si dispo localement).
+# Exemples : legacy (défaut) | v3.2.0-legacy (tag plus ancien, à vérifier)
+KSU_REF="${KSU_REF:-legacy}"
+# Branche utilisée UNIQUEMENT si userspace/ksud n'existe pas dans le checkout
+KSUD_FALLBACK_REF="${KSUD_FALLBACK_REF:-v3.4.2}"
+# Commit du driver : parent (465490a) du commit 0b17f24 "Add module preinit" (UAPI 6)
+KSU_COMMIT="${KSU_COMMIT:-465490a}"
+# UAPI attendue par le manager installé (suffixe affiché, ex. 33355-5)
+KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"
+
+# --- SuSFS (optionnel) ---
+# off   : aucun SuSFS (comportement identique à la v2.9)
+# probe : affiche le support SuSFS du driver, télécharge le patch, fait un essai à blanc
+#         et S'ARRÊTE avant la compilation (aucune image produite)
+# apply : applique le patch, active CONFIG_KSU_SUSFS et compile (abandon si l'essai à blanc échoue)
+SUSFS_MODE="${SUSFS_MODE:-probe}"
+SUSFS_PATCH_URL="${SUSFS_PATCH_URL:-https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd/raw/refs/heads/mainline/Patches/Patch/susfs_patch_to_4.19.patch}"
+# Sous-options CONFIG_KSU_SUSFS_<X>=y ; celles que le driver ne définit pas sont ignorées
+# silencieusement par olddefconfig (le script affiche ce qui a été retenu)
+SUSFS_OPTIONS="${SUSFS_OPTIONS:-SUS_PATH SUS_MOUNT SUS_KSTAT SUS_MAP OPEN_REDIRECT SPOOF_UNAME SPOOF_CMDLINE_OR_BOOTCONFIG ENABLE_LOG HIDE_KSU_SUSFS_SYMBOLS}"
+SUSFS_APPLIED=0
+
+echo "=== Build KernelSU-Next ($KSU_REF) pour noyau 4.19 ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
@@ -28,17 +56,47 @@ git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lin
 cd kernel_sources
 git log --oneline -1
 
-# ==================== 2. INTÉGRATION KernelSU-Next (legacy) ====================
-echo "=== Intégration KernelSU-Next (legacy) ==="
-rm -rf drivers/kernelsu KernelSU susfs4ksu 2>/dev/null || true
+# ==================== 2. INTÉGRATION KernelSU-Next ====================
+echo "=== Intégration KernelSU-Next ($KSU_REF) ==="
+rm -rf drivers/kernelsu KernelSU KernelSU-Next susfs4ksu 2>/dev/null || true
 
-# La branche 'legacy' est celle prévue pour les noyaux non-GKI (4.14+)
-curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSU_REF"
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration KernelSU-Next"; exit 1
 fi
-echo "✅ KernelSU-Next (legacy) intégré"
+echo "✅ KernelSU-Next ($KSU_REF) intégré"
+
+# --- Épinglage du driver sur un commit précis + vérification de l'UAPI ---
+if [ -n "$KSU_COMMIT" ] && [ -d "KernelSU-Next/.git" ]; then
+    echo "=== Épinglage KernelSU-Next sur $KSU_COMMIT ==="
+    git -C KernelSU-Next fetch --unshallow 2>/dev/null || git -C KernelSU-Next fetch --all 2>/dev/null || true
+    git -C KernelSU-Next checkout "$KSU_COMMIT"
+    git -C KernelSU-Next log --oneline -1
+fi
+UAPI_FILE=$(find KernelSU-Next -path "*/uapi/supercall.h" -type f 2>/dev/null | head -1 || true)
+if [ -n "$UAPI_FILE" ]; then
+    UAPI_FOUND=$(grep -E "^(#define|static const).*KERNEL_SU_UAPI_VERSION" "$UAPI_FILE" | grep -oE "[0-9]+" | tail -1 || true)
+    echo "UAPI du driver : ${UAPI_FOUND:-?}  (attendue : $KSU_EXPECTED_UAPI)  [$UAPI_FILE]"
+    if [ -n "$UAPI_FOUND" ] && [ "$UAPI_FOUND" != "$KSU_EXPECTED_UAPI" ]; then
+        echo "❌ UAPI du driver ($UAPI_FOUND) différente de celle attendue ($KSU_EXPECTED_UAPI) : abandon avant compilation"
+        exit 1
+    fi
+else
+    echo "⚠️  uapi/supercall.h introuvable, UAPI non vérifiée"
+fi
+
+# --- Traçabilité : ce qui a RÉELLEMENT été compilé ---
+echo ""
+echo "=== Version KernelSU-Next intégrée ==="
+for d in KernelSU-Next KernelSU; do
+    if [ -d "$d/.git" ]; then
+        echo "Dépôt : $d"
+        echo -n "  describe : "; git -C "$d" describe --tags --always 2>/dev/null || echo "?"
+        echo -n "  commit   : "; git -C "$d" rev-parse HEAD 2>/dev/null || echo "?"
+        echo -n "  branche  : "; git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?"
+    fi
+done
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -48,6 +106,66 @@ else
     KSU_DIR="KernelSU"
 fi
 echo "KSU_DIR : $KSU_DIR"
+
+# Dossier racine du dépôt KernelSU-Next cloné (pour ksud plus tard)
+KSU_REPO_ROOT=""
+for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/kernel_sources/KernelSU"; do
+    if [ -d "$d" ]; then KSU_REPO_ROOT="$d"; break; fi
+done
+echo "KSU_REPO_ROOT : ${KSU_REPO_ROOT:-introuvable}"
+
+# ==================== 2s. SuSFS (optionnel) ====================
+if [ "$SUSFS_MODE" != "off" ]; then
+    echo ""
+    echo "=== SuSFS (mode : $SUSFS_MODE) ==="
+
+    echo "--- Support SuSFS dans le driver KernelSU-Next ---"
+    echo "Fichiers du driver qui mentionnent susfs :"
+    grep -rli susfs "$KSU_DIR/" 2>/dev/null | head -20 || true
+    echo "Entrées Kconfig SUSFS du driver :"
+    grep -n "SUSFS" "$KSU_DIR/Kconfig" 2>/dev/null | head -30 || echo "  (aucune)"
+
+    echo "--- Téléchargement du patch SuSFS ---"
+    echo "URL : $SUSFS_PATCH_URL"
+    curl -fsSL "$SUSFS_PATCH_URL" -o /tmp/susfs.patch
+    echo "Patch : $(wc -l < /tmp/susfs.patch) lignes. Fichiers touchés :"
+    grep -E '^diff --git' /tmp/susfs.patch | awk '{print $3}' | sed 's|^a/||' | sed 's/^/  /'
+
+    echo "--- Essai à blanc (patch -p1 -F1 --dry-run) ---"
+    set +e
+    patch -p1 -F1 --dry-run --forward < /tmp/susfs.patch > /tmp/susfs_dry.log 2>&1
+    DRY_RC=$?
+    set -e
+    echo "Code retour : $DRY_RC (0 = tout s'applique)"
+    echo "Hunks en échec :"
+    awk '/^checking file/{f=$3} /FAILED/{print "  "f": "$0}' /tmp/susfs_dry.log | head -80
+    echo "Hunks appliqués avec fuzz ou décalage important :"
+    grep -E "with fuzz|offset [0-9]{3,} lines" /tmp/susfs_dry.log | head -40 || true
+    echo "Fichiers inexistants dans ta source :"
+    grep -E "can't find file|No such file" /tmp/susfs_dry.log | head -20 || true
+
+    if [ "$SUSFS_MODE" = "probe" ]; then
+        echo ""
+        echo "=== Mode probe : arrêt avant compilation (aucune image produite) ==="
+        echo "Colle-moi ce bloc « SuSFS » du log, puis passe SUSFS_MODE=apply si tout est vert."
+        exit 0
+    fi
+
+    if [ "$SUSFS_MODE" = "apply" ]; then
+        if [ "$DRY_RC" -ne 0 ]; then
+            echo "❌ L'essai à blanc a échoué : abandon avant compilation (voir les hunks en échec ci-dessus)"
+            exit 1
+        fi
+        patch -p1 -F1 --forward --no-backup-if-mismatch < /tmp/susfs.patch
+        for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+            if [ -f "$f" ]; then echo "  ✅ $f présent"; else echo "  ⚠️  $f absent après le patch"; fi
+        done
+        SUSFS_APPLIED=1
+        echo "✅ Patch SuSFS appliqué"
+    else
+        echo "❌ SUSFS_MODE inconnu : $SUSFS_MODE (off | probe | apply)"; exit 1
+    fi
+fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
 echo ""
@@ -279,7 +397,12 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
   echo "CONFIG_KSU=y"
   echo "CONFIG_KSU_MANUAL_HOOK=y"
   echo "# CONFIG_KSU_WITH_KPROBES is not set"
-  echo "# CONFIG_KSU_SUSFS is not set"
+  if [ "$SUSFS_APPLIED" = "1" ]; then
+      echo "CONFIG_KSU_SUSFS=y"
+      for o in $SUSFS_OPTIONS; do echo "CONFIG_KSU_SUSFS_${o}=y"; done
+  else
+      echo "# CONFIG_KSU_SUSFS is not set"
+  fi
   echo "# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set"
   echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
   echo "CONFIG_KPROBES=y"
@@ -294,7 +417,13 @@ make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPIL
 make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -5
 
 echo "=== État final .config ==="
+grep -E "KSU_SUSFS" out/.config | head -40 || true
 grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_WITH_KPROBES|KSU_TRACEPOINT|KSU_TAMPER|SECCOMP" out/.config | head -20 || true
+
+if [ "$SUSFS_APPLIED" = "1" ] && ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
+    echo "❌ CONFIG_KSU_SUSFS n'a pas été retenu par Kconfig (dépendance non satisfaite ?), abandon"
+    exit 1
+fi
 
 if ! grep -q "^CONFIG_KSU=y" out/.config; then
     echo "❌ CONFIG_KSU non activé, abandon"
@@ -320,10 +449,34 @@ else
     exit 1
 fi
 
-# ==================== 7. COMPILATION KSUD (depuis la branche 'dev') ====================
+# ==================== 7. COMPILATION KSUD (même checkout que le driver) ====================
 echo ""
-echo "=== Compilation ksud (KernelSU-Next dev) ==="
+echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
+
+# Source de ksud : on privilégie le checkout déjà utilisé pour le driver
+KSUD_DIR=""
+KSUD_ROOT=""
+if [ -n "$KSU_REPO_ROOT" ] && [ -f "$KSU_REPO_ROOT/userspace/ksud/Cargo.toml" ]; then
+    KSUD_DIR="$KSU_REPO_ROOT/userspace/ksud"
+    KSUD_ROOT="$KSU_REPO_ROOT"
+    echo "✅ ksud pris dans le MÊME checkout que le driver ($KSU_REF) : $KSUD_DIR"
+else
+    echo "⚠️  userspace/ksud absent du checkout $KSU_REF"
+    echo "⚠️  Fallback : ksud depuis la branche '$KSUD_FALLBACK_REF' (risque de protocole différent du driver)"
+    rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
+    git clone --depth=1 --branch "$KSUD_FALLBACK_REF" https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
+    KSUD_DIR="$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
+    KSUD_ROOT="$GITHUB_WORKSPACE/ksud-src"
+    echo -n "  ksud fallback commit : "; git -C "$GITHUB_WORKSPACE/ksud-src" rev-parse HEAD
+    echo -n "  ksud fallback describe : "; git -C "$GITHUB_WORKSPACE/ksud-src" describe --tags --always 2>/dev/null || echo "?"
+    echo "  UAPI vue par ksud :"; grep -rn "KERNEL_SU_UAPI_VERSION" "$GITHUB_WORKSPACE/ksud-src" --include=*.h --include=*.rs 2>/dev/null | head -5 || true
+fi
+
+if [ ! -f "$KSUD_DIR/Cargo.toml" ]; then
+    echo "❌ Cargo.toml de ksud introuvable dans $KSUD_DIR"; exit 1
+fi
+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 rustup toolchain install nightly; rustup default nightly; rustup target add aarch64-linux-android
@@ -334,10 +487,7 @@ export AARCH64_CLANGXX_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x8
 export AR_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/aarch64-linux-android"
 
-rm -rf "$GITHUB_WORKSPACE/ksud-src" 2>/dev/null || true
-# On clone la branche 'dev' qui contient le dossier userspace/ksud
-git clone --depth=1 --branch dev https://github.com/KernelSU-Next/KernelSU-Next.git "$GITHUB_WORKSPACE/ksud-src"
-cd "$GITHUB_WORKSPACE/ksud-src/userspace/ksud"
+cd "$KSUD_DIR"
 mkdir -p .cargo
 cat > .cargo/config.toml <<EOF
 [target.aarch64-linux-android]
@@ -350,10 +500,11 @@ BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android = "$BINDGEN_EXTRA_CLANG_ARGS_aarc
 EOF
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 cargo +nightly build --release --target aarch64-linux-android
-KSUD_BINARY=$(find "$GITHUB_WORKSPACE/ksud-src" -type f -name "ksud" -executable 2>/dev/null | head -1 || true)
+
+KSUD_BINARY=$(find "$KSUD_ROOT" -type f -path "*aarch64-linux-android/release/ksud" 2>/dev/null | head -1 || true)
 if [ -z "$KSUD_BINARY" ]; then echo "❌ ksud introuvable"; exit 1; fi
 cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
-echo "✅ ksud compilé (KernelSU-Next dev)"
+echo "✅ ksud compilé ($KSUD_BINARY)"
 cd "$GITHUB_WORKSPACE"
 
 # ==================== 8. REPACK (MÉTHODE BACKSLASHXX) ====================
@@ -426,10 +577,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.7-boot.img
+cp final_boot.img output/KernelSU-Next-v3.0-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.7 (KernelSU-Next sans SUSFS) ==="
+echo "=== BUILD TERMINÉ v3.0 (KernelSU-Next $KSU_REF, SuSFS appliqué : $SUSFS_APPLIED) ==="
 ls -lh output/
