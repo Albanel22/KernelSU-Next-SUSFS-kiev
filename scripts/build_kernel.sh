@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v3.7 : Forçage inconditionnel de susfs.o dans fs/Makefile pour résoudre les symboles non définis
+# v3.8 : Vérification de l'existence de fs/susfs.c et forçage de compilation
 # =============================================================================
 
 KSU_REF="${KSU_REF:-legacy}"
@@ -107,7 +107,7 @@ def fix_file(path, target, addition):
             content += '\n' + addition
         with open(path, 'w') as f: f.write(content)
 
-# FORÇAGE ABSOLU : Ajouter susfs.o directement dans obj-y de fs/Makefile pour garantir sa compilation
+# Forcer l'ajout de susfs.o dans obj-y au début de fs/Makefile
 with open('fs/Makefile', 'r') as f:
     mf_content = f.read()
 if 'susfs.o' not in mf_content:
@@ -153,6 +153,16 @@ if 'SUSFS_IS_INODE_SUS_MAP' not in tmu_content:
     tmu_content = tmu_content.replace(target_pagemap, replacement_map, 1)
     with open('fs/proc/task_mmu.c', 'w') as f: f.write(tmu_content)
 PYEOF
+
+    # --- Vérification critique de l'existence des fichiers SuSFS ---
+    for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+        if [ -f "$f" ]; then
+            echo "  ✅ $f présent"
+        else
+            echo "  ❌ ERREUR : $f est introuvable après le patch !"
+            exit 1
+        fi
+    done
 
     # --- Injection des symboles Kconfig SuSFS ---
     KCONFIG_FILE="$KSU_DIR/Kconfig"
@@ -211,7 +221,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué, susfs.o forcé dans fs/Makefile et Kconfig enregistré"
+    echo "✅ SuSFS appliqué, vérifié et enregistré avec succès"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -492,10 +502,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.7-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v3.8-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.7 (KernelSU-Next + SuSFS susfs.o forcé dans obj-y) ==="
+echo "=== BUILD TERMINÉ v3.8 (KernelSU-Next + SuSFS vérifié v3.8) ==="
 ls -lh output/
