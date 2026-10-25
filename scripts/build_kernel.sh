@@ -4,6 +4,8 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + ksud aligné
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
+# v3.1 : le mode probe applique réellement le patch (build jetable) et affiche les hunks
+#        rejetés (.rej) + le contexte de TA source autour de chaque échec
 # v3.0 : SuSFS optionnel (patch JackA1ltman susfs_patch_to_4.19) en 3 modes :
 #        off (comme v2.9) | probe (diagnostic + essai à blanc, sans compiler) | apply
 # v2.9 : driver épinglé sur le commit PARENT du commit preinit (UAPI 5, compatible
@@ -145,6 +147,35 @@ if [ "$SUSFS_MODE" != "off" ]; then
     grep -E "can't find file|No such file" /tmp/susfs_dry.log | head -20 || true
 
     if [ "$SUSFS_MODE" = "probe" ]; then
+        echo ""
+        echo "--- Application réelle du patch (build jetable) pour récupérer les hunks rejetés ---"
+        set +e
+        patch -p1 -F1 --forward --no-backup-if-mismatch < /tmp/susfs.patch > /tmp/susfs_real.log 2>&1
+        set -e
+        for r in $(find . -name "*.rej" -not -path "./KernelSU-Next/*" 2>/dev/null | sort); do
+            echo ""
+            echo "===== $r ====="
+            head -150 "$r"
+        done
+
+        echo ""
+        echo "--- Contexte de ta source autour de chaque échec ---"
+        echo "##### fs/Makefile (lignes 8-25)"
+        sed -n '8,25p' fs/Makefile 2>/dev/null || true
+        echo "##### fs/namespace.c (lignes 18-45)"
+        sed -n '18,45p' fs/namespace.c 2>/dev/null || true
+        N=$(grep -n "^vfs_kern_mount" fs/namespace.c 2>/dev/null | head -1 | cut -d: -f1 || true)
+        if [ -n "${N:-}" ]; then
+            echo "##### fs/namespace.c : vfs_kern_mount (ligne $N)"
+            sed -n "$((N-3)),$((N+45))p" fs/namespace.c
+        fi
+        echo "##### fs/super.c (lignes 22-50)"
+        sed -n '22,50p' fs/super.c 2>/dev/null || true
+        echo "##### mm/memory.c (lignes 66-96)"
+        sed -n '66,96p' mm/memory.c 2>/dev/null || true
+        echo "##### fs/proc/task_mmu.c (lignes 1640-1700)"
+        sed -n '1640,1700p' fs/proc/task_mmu.c 2>/dev/null || true
+
         echo ""
         echo "=== Mode probe : arrêt avant compilation (aucune image produite) ==="
         echo "Colle-moi ce bloc « SuSFS » du log, puis passe SUSFS_MODE=apply si tout est vert."
@@ -577,10 +608,10 @@ cd ..
 
 # ==================== 10. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.0-boot.img
+cp final_boot.img output/KernelSU-Next-v3.1-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.0 (KernelSU-Next $KSU_REF, SuSFS appliqué : $SUSFS_APPLIED) ==="
+echo "=== BUILD TERMINÉ v3.1 (KernelSU-Next $KSU_REF, SuSFS appliqué : $SUSFS_APPLIED) ==="
 ls -lh output/
