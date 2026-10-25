@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v3.9 : Forçage de la macro CONFIG_KSU_SUSFS dans fs/Makefile pour susfs.o
+# v4.0 : Correction de l'insertion de susfs.o dans fs/Makefile (fin du bug d'écrasement :=)
 # =============================================================================
 
 KSU_REF="${KSU_REF:-legacy}"
@@ -81,7 +81,7 @@ for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/ker
     if [ -d "$d" ]; then KSU_REPO_ROOT="$d"; break; fi
 done
 
-# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig + Flags Makefile) ====================
+# ==================== 2s. SuSFS (Application + Correcteur Python + Kconfig + Makefile Propre) ====================
 if [ "$SUSFS_MODE" != "off" ]; then
     echo ""
     echo "=== SuSFS (mode : $SUSFS_MODE) ==="
@@ -93,7 +93,7 @@ if [ "$SUSFS_MODE" != "off" ]; then
     set -e
     rm -f $(find . -name "*.rej") 2>/dev/null || true
 
-    echo "--- Correcteur Python SuSFS (forçage compilation et macro C) ---"
+    echo "--- Correcteur Python SuSFS (placement propre de susfs.o dans fs/Makefile) ---"
     python3 << 'PYEOF'
 import os
 
@@ -107,12 +107,15 @@ def fix_file(path, target, addition):
             content += '\n' + addition
         with open(path, 'w') as f: f.write(content)
 
-# Forcer l'ajout de susfs.o et des drapeaux de macro dans fs/Makefile
+# Insertion propre de obj-$(CONFIG_KSU_SUSFS) += susfs.o dans fs/Makefile
 with open('fs/Makefile', 'r') as f:
     mf_content = f.read()
 if 'susfs.o' not in mf_content:
-    susfs_rule = 'obj-y += susfs.o\nccflags-y += -DCONFIG_KSU_SUSFS=1\n'
-    mf_content = mf_content.replace('obj-y :=', susfs_rule + 'obj-y :=', 1)
+    target_mf = 'stack.o fs_struct.o statfs.o fs_pin.o nsfs.o'
+    if target_mf in mf_content:
+        mf_content = mf_content.replace(target_mf, target_mf + '\nobj-$(CONFIG_KSU_SUSFS) += susfs.o', 1)
+    else:
+        mf_content += '\nobj-$(CONFIG_KSU_SUSFS) += susfs.o\n'
     with open('fs/Makefile', 'w') as f:
         f.write(mf_content)
 
@@ -221,7 +224,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué, forcé et validé v3.9"
+    echo "✅ SuSFS appliqué et validé v4.0"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -502,10 +505,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v3.9-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v4.0-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v3.9 (KernelSU-Next + SuSFS ccflags-y forcé) ==="
+echo "=== BUILD TERMINÉ v4.0 (KernelSU-Next + SuSFS Makefile propre) ==="
 ls -lh output/
