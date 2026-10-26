@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v4.8 : Écrasement direct et propre de file_wrapper.c compatible noyau 4.19
+# v4.9 : Correction des chaînes multilignes pr_err dans file_wrapper.c
 # =============================================================================
 
 KSU_REF="${KSU_REF:-next}"
@@ -75,7 +75,7 @@ if [ "$SUSFS_MODE" != "off" ]; then
     set -e
     rm -f $(find . -name "*.rej") 2>/dev/null || true
 
-    echo "--- Correcteur Python & Remplacement de file_wrapper.c v4.8 ---"
+    echo "--- Correcteur Python & Remplacement de file_wrapper.c v4.9 ---"
     python3 << 'PYEOF'
 import os
 
@@ -134,8 +134,7 @@ if 'SUSFS_IS_INODE_SUS_MAP' not in tmu_content:
     tmu_content = tmu_content.replace(target_pagemap, replacement_map, 1)
     with open('fs/proc/task_mmu.c', 'w') as f: f.write(tmu_content)
 
-# --- Écrasement direct de file_wrapper.c avec la version 4.19 propre ---
-fw_path = 'drivers/kernelsu/infra/file_wrapper.h' # si besoin ou directement le .c
+# --- Écrasement direct de file_wrapper.c avec chaînes sécurisées ---
 fw_c_path = 'drivers/kernelsu/infra/file_wrapper.c'
 os.makedirs(os.path.dirname(fw_c_path), exist_ok=True)
 
@@ -609,7 +608,9 @@ void __init ksu_file_wrapper_init(void)
         return;
     }
     anon_inode_mnt = dummy->f_path.mnt;
-    if (unlikely(!anon_inode_mnt)) { pr_err("file_wrapper: initialize anon_inode_mnt failed, got NULL\n"); }
+    if (unlikely(!anon_inode_mnt)) {
+        pr_err("file_wrapper: initialize anon_inode_mnt failed, got NULL\n");
+    }
     fput(dummy);
 #endif
 }
@@ -676,7 +677,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué et file_wrapper.c géré automatiquement v4.8"
+    echo "✅ SuSFS appliqué et file_wrapper.c géré automatiquement v4.9"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -955,10 +956,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v4.8-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v4.9-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.8 (KernelSU-Next + SuSFS file_wrapper 4.19 natif) ==="
+echo "=== BUILD TERMINÉ v4.9 (KernelSU-Next + SuSFS file_wrapper 4.19 corrigé) ==="
 ls -lh output/
