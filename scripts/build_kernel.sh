@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # KernelSU-Next + SuSFS + ksud
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v4.3 : Résolution des erreurs de symboles Feature/Selinux_hide dans KernelSU-Next
+# v4.4 : Adaptation de file_wrapper.c pour le noyau 4.19 (suppression iopoll / remap_file_range)
 # =============================================================================
 
 KSU_REF="${KSU_REF:-next}"
@@ -63,7 +63,7 @@ for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/ker
     if [ -d "$d" ]; then KSU_REPO_ROOT="$d"; break; fi
 done
 
-# ==================== 2s. SuSFS (Application + Correcteur Python v4.3) ====================
+# ==================== 2s. SuSFS & Adaptations 4.19 (file_wrapper.c) ====================
 if [ "$SUSFS_MODE" != "off" ]; then
     echo ""
     echo "=== SuSFS (mode : $SUSFS_MODE) ==="
@@ -75,7 +75,7 @@ if [ "$SUSFS_MODE" != "off" ]; then
     set -e
     rm -f $(find . -name "*.rej") 2>/dev/null || true
 
-    echo "--- Correcteur Python SuSFS (intégration directe susfs.o dans obj-y) ---"
+    echo "--- Correcteur Python (fs/Makefile, headers et file_wrapper.c) ---"
     python3 << 'PYEOF'
 import os
 
@@ -133,6 +133,20 @@ if 'SUSFS_IS_INODE_SUS_MAP' not in tmu_content:
     replacement_map = map_hook + '\n\t' + target_pagemap + map_end
     tmu_content = tmu_content.replace(target_pagemap, replacement_map, 1)
     with open('fs/proc/task_mmu.c', 'w') as f: f.write(tmu_content)
+
+# --- Correction de file_wrapper.c pour supprimer iopoll et remap_file_range sur noyau 4.19 ---
+fw_path = 'drivers/kernelsu/infra/file_wrapper.c'
+if os.path.exists(fw_path):
+    fw_content = open(fw_path, 'r').read()
+    # Neutraliser iopoll
+    fw_content = fw_content.replace('return orig->f_op->iopoll(kiocb, spin);', 'return -EINVAL;')
+    fw_content = fw_content.replace('p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;', '/* p->ops.iopoll removed for 4.19 */')
+    # Neutraliser remap_file_range / REMAP_FILE_DEDUP
+    fw_content = fw_content.replace('if (remap_flags & REMAP_FILE_DEDUP)', 'if (0)')
+    fw_content = fw_content.replace('return orig->f_op->remap_file_range', 'return -EOPNOTSUPP;\n/* orig->f_op->remap_file_range */')
+    fw_content = fw_content.replace('p->ops.remap_file_range =', '/* p->ops.remap_file_range removed */\n//')
+    open(fw_path, 'w').write(fw_content)
+    print("✅ drivers/kernelsu/infra/file_wrapper.c adapté pour le noyau 4.19")
 PYEOF
 
     # --- Injection des symboles Kconfig SuSFS ---
@@ -192,7 +206,7 @@ EOF
     fi
 
     SUSFS_APPLIED=1
-    echo "✅ SuSFS appliqué v4.3"
+    echo "✅ SuSFS appliqué et file_wrapper.c patché v4.4"
 fi
 
 # ==================== 2e. NEUTRALISATION CHECK.MK ====================
@@ -471,10 +485,10 @@ cd ..
 
 # ==================== 9. SORTIE ====================
 mkdir -p output
-cp final_boot.img output/KernelSU-Next-v4.3-SuSFS-boot.img
+cp final_boot.img output/KernelSU-Next-v4.4-SuSFS-boot.img
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v4.3 (KernelSU-Next + SuSFS stabilisé) ==="
+echo "=== BUILD TERMINÉ v4.4 (KernelSU-Next + SuSFS file_wrapper patché) ==="
 ls -lh output/
