@@ -92,10 +92,235 @@ echo "SHA complet de la source : $(git rev-parse HEAD)" | tee -a "$AUDIT"
 
 # ==================== 2. SuSFS 2.3.0 : PARTIE NOYAU (patch de Jack, copie épinglée) ====================
 # Appliqué AVANT KernelSU-Next, sur un arbre vierge, comme dans le build SukiSU validé.
-@@SEG_PATCH@@
+echo "=== Patch SUSFS 4.19 ==="
+BASE_JACK="https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches"
+SUSFS_PATCH="/tmp/susfs_patch_to_4.19.patch"
+# Un exemplaire placé dans le dépôt (patches/) est prioritaire : il fige la version du patch,
+# alors que la branche "mainline" de Jack change sans prévenir.
+if [ -f "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" ]; then
+    cp "$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch" "$SUSFS_PATCH"
+    echo "Patch SuSFS : copie locale du dépôt (patches/)" | tee -a "$AUDIT"
+else
+    curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o "$SUSFS_PATCH" || { echo "❌ download échoué"; exit 1; }
+    echo "Patch SuSFS : téléchargé depuis la branche mainline (non figé)" | tee -a "$AUDIT"
+fi
+cp "$SUSFS_PATCH" "$GITHUB_WORKSPACE/output/" 2>/dev/null || true
+echo "sha256 patch SuSFS : $(sha256sum "$SUSFS_PATCH" | cut -d' ' -f1)" | tee -a "$AUDIT"
+if [ -f fs/susfs.c ]; then
+    echo "fs/susfs.c AVANT patch : $(wc -l < fs/susfs.c) lignes" | tee -a "$AUDIT"
+else
+    echo "fs/susfs.c AVANT patch : absent (fourni par le patch)" | tee -a "$AUDIT"
+fi
+
+# Contrôle d'intégrité du patch : chaque bloc (@@) doit contenir autant de lignes que son en-tête l'annonce
+python3 - "$SUSFS_PATCH" <<'PYEOF' 2>&1 | tee -a "$AUDIT"
+import re, sys
+t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+lines = t.split('\n')
+print(f"  patch : {len(lines)} lignes, {t.count(chr(9))} tabulations, CRLF={'oui' if chr(13) in t else 'non'}")
+files = re.findall(r'^diff --git a/(\S+)', t, re.M)
+print(f"  patch : {len(files)} fichiers, fs/susfs.c {'présent' if 'fs/susfs.c' in files else 'ABSENT'}")
+bad = []
+cur = None
+i = 0
+n = len(lines)
+while i < n:
+    line = lines[i]
+    m = re.match(r'diff --git a/(\S+)', line)
+    if m:
+        cur = m.group(1)
+    h = re.match(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', line)
+    if h:
+        want_old = int(h.group(2) if h.group(2) is not None else 1)
+        want_new = int(h.group(4) if h.group(4) is not None else 1)
+        old = new = 0
+        i += 1
+        while i < n and (old < want_old or new < want_new):
+            l = lines[i]
+            if l.startswith('+'): new += 1
+            elif l.startswith('-'): old += 1
+            elif l.startswith('\\'): pass
+            elif l == '' and i == n - 1: break
+            elif l.startswith(' ') or l == '': old += 1; new += 1
+            else: break
+            i += 1
+        if old != want_old or new != want_new:
+            bad.append((cur, line.strip(), old, want_old, new, want_new))
+        continue
+    i += 1
+if bad:
+    print(f"  ❌ {len(bad)} bloc(s) incohérent(s) : patch tronqué ou modifié")
+    for b in bad[:8]:
+        print(f"     {b[0]} {b[1]} : lignes lues -{b[2]}/+{b[4]}, annoncées -{b[3]}/+{b[5]}")
+else:
+    print("  ✅ patch cohérent (tous les blocs ont la taille annoncée)")
+PYEOF
+
+if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
+    patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1
+    echo "  ✅ patch appliqué"
+else
+    echo "  ⚠️ Patch partiellement rejeté"
+    patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 || true
+fi
+
+if [ ! -f fs/susfs.c ]; then
+    echo "❌ fs/susfs.c absent après le patch : la copie utilisée est incomplète ou abîmée" | tee -a "$AUDIT"
+    tail -n 25 /tmp/susfs_patch.log | tee -a "$AUDIT" || true
+    if [ "${SUSFS_PATCH_FALLBACK:-1}" = "1" ]; then
+        echo "→ nouvelle tentative avec le patch de la branche mainline (SUSFS_PATCH_FALLBACK=0 pour l'interdire)" | tee -a "$AUDIT"
+        if curl -LSsf "$BASE_JACK/Patch/susfs_patch_to_4.19.patch" -o /tmp/susfs_patch_mainline.patch; then
+            echo "sha256 patch mainline : $(sha256sum /tmp/susfs_patch_mainline.patch | cut -d' ' -f1)" | tee -a "$AUDIT"
+            cp /tmp/susfs_patch_mainline.patch "$GITHUB_WORKSPACE/output/susfs_patch_mainline.patch" 2>/dev/null || true
+            patch -p1 --forward < /tmp/susfs_patch_mainline.patch > /tmp/susfs_patch2.log 2>&1 || true
+        fi
+    fi
+    if [ ! -f fs/susfs.c ]; then
+        echo "❌ fs/susfs.c toujours absent : arrêt du build" | tee -a "$AUDIT"
+        exit 1
+    fi
+fi
+
+echo ""
+echo "=== Blocs rejetés du patch SuSFS : nouvelle tentative avec fuzz ==="
+mkdir -p "$GITHUB_WORKSPACE/output/rejects-initiaux" "$GITHUB_WORKSPACE/output/rejects-restants"
+find . -name "*.rej" -exec cp --parents {} "$GITHUB_WORKSPACE/output/rejects-initiaux/" \; 2>/dev/null || true
+mapfile -t REJS < <(find . -name "*.rej" | sort)
+echo "${#REJS[@]} fichier(s) .rej à retraiter"
+for rej in "${REJS[@]}"; do
+    base="${rej%.rej}"
+    case "$base" in
+        ./fs/namespace.c|./fs/super.c|./fs/proc/task_mmu.c|./mm/memory.c) ;;
+        *) echo "  ⏭️ $base : hors liste, non retraité"; continue ;;
+    esac
+    if patch -F3 --forward --no-backup-if-mismatch "$base" < "$rej" > /tmp/retry.log 2>&1; then
+        echo "  ✅ $base : blocs appliqués avec fuzz"
+        rm -f "$rej"
+    else
+        echo "  ⚠️ $base : échec persistant"
+        tail -6 /tmp/retry.log
+    fi
+done
+find . -name "*.rej" -exec cp --parents {} "$GITHUB_WORKSPACE/output/rejects-restants/" \; 2>/dev/null || true
+echo "reste après retry : $(find . -name '*.rej' | wc -l) fichier(s) .rej"
+find . -name "*.rej" -delete 2>/dev/null || true
+find . -name "*.orig" -delete 2>/dev/null || true
+
+# Injection manuelle namespace.c (chaque morceau n'est ajouté que s'il manque)
+python3 - <<'PYEOF'
+import re
+path = 'fs/namespace.c'
+with open(path) as f: c = f.read()
+done = []
+
+# (1) includes et déclarations externes (bloc #1 du patch)
+if 'susfs_is_current_ksu_domain' not in c:
+    anchor1 = '#include "internal.h"\n'
+    bloc1 = ('\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n'
+             '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+             'extern bool susfs_is_current_ksu_domain(void);\n'
+             'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
+             '#define CL_COPY_MNT_NS BIT(25)\n#endif\n')
+    c = c.replace(anchor1, anchor1 + bloc1, 1)
+    done.append('includes/externs')
+
+# (2) hook dans vfs_kern_mount (bloc #6 du patch). Le contexte du patch attend
+#     "return ERR_PTR(-ENODEV)" ; selon le noyau c'est -EINVAL ou -ENODEV.
+if 'susfs_alloc_non_unshare_ksu_vfsmnt(name' not in c:
+    pattern = r'(vfs_kern_mount\([^)]*\)\s*\{.*?if \(!type\)\s*\n\s*return ERR_PTR\(-E\w+\);\s*\n)'
+    match = re.search(pattern, c, re.DOTALL)
+    if match:
+        bloc2 = ('\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                 '\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {\n'
+                 '\t\tif (susfs_is_current_ksu_domain()) {\n'
+                 '\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n'
+                 '\t\t\tgoto bypass_orig_flow;\n\t\t}\n\t}\n#endif\n')
+        c = c[:match.end()] + bloc2 + c[match.end():]
+        m2 = re.compile(r'mnt = alloc_vfsmnt\(name\);\s*\n').search(c, match.end() + len(bloc2))
+        if m2:
+            label = '\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nbypass_orig_flow:\n#endif\n'
+            c = c[:m2.end()] + label + c[m2.end():]
+            done.append('hook vfs_kern_mount')
+        else:
+            print("  ⚠️ vfs_kern_mount : appel alloc_vfsmnt(name) introuvable, hook non injecté")
+            c = c[:match.end()] + c[match.end() + len(bloc2):]
+    else:
+        print("  ⚠️ vfs_kern_mount : motif introuvable, hook non injecté")
+
+with open(path, 'w') as f: f.write(c)
+print("  namespace.c : injecté = " + (", ".join(done) if done else "rien (déjà présent)"))
+PYEOF
+
+python3 - <<'PYEOF'
+import sys, os
+path = 'fs/namespace.c'
+with open(path) as f: c = f.read()
+hdr = ''
+if os.path.exists('include/linux/susfs_def.h'):
+    with open('include/linux/susfs_def.h') as hf: hdr = hf.read()
+if '#define DEFAULT_KSU_MNT_ID' in hdr:
+    # susfs_def.h définit déjà ces macros : on retire les doublons éventuels de namespace.c
+    # (un bloc du patch, appliqué avec fuzz, les redéfinit avec d'autres valeurs)
+    import re
+    n_total = 0
+    for name in ('DEFAULT_KSU_MNT_ID', 'DEFAULT_KSU_MNT_GROUP_ID'):
+        if re.search(r'#define\s+' + name + r'\b', hdr):
+            c, n = re.subn(r'^[ \t]*#define[ \t]+' + name + r'\b[^\n]*\n', '', c, flags=re.M)
+            n_total += n
+    if n_total:
+        with open(path, 'w') as f: f.write(c)
+    print(f"  ↻ macros KSU_MNT déjà définies par susfs_def.h : {n_total} doublon(s) retiré(s) de namespace.c")
+    sys.exit(0)
+try:
+    hdr = open('include/linux/susfs_def.h').read()
+except FileNotFoundError:
+    hdr = ''
+if '#define DEFAULT_KSU_MNT_ID' not in c and '#define DEFAULT_KSU_MNT_ID' not in hdr and 'DEFAULT_KSU_MNT_ID' in c:
+    anchor = '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */'
+    c = c.replace(anchor, anchor + '\n#define DEFAULT_KSU_MNT_ID 500000\n#define DEFAULT_KSU_MNT_GROUP_ID 5000\n', 1) if anchor in c else '#define DEFAULT_KSU_MNT_ID 500000\n' + c
+    with open(path, 'w') as f: f.write(c)
+PYEOF
+
+find . -name "*.rej" -delete 2>/dev/null || true
+if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
+    echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+fi
+
 
 # Corrections de compatibilité 4.19 (partie noyau uniquement)
-@@SEG_COMPAT@@
+# fdinfo.c
+python3 - <<'PYEOF'
+import re, sys
+path = 'fs/notify/fdinfo.c'
+with open(path) as f: c = f.read()
+if 'SUSFS_FDINFO_3ARGS_FIX' in c: sys.exit(0)
+pattern = r'static\s+void\s+inotify_fdinfo\s*\(\s*struct\s+seq_file\s*\*\s*(\w+)\s*,\s*struct\s+fsnotify_mark\s*\*\s*(\w+)\s*\)'
+match = re.search(pattern, c)
+if match:
+    new_sig = f'static void inotify_fdinfo(struct seq_file *{match.group(1)}, struct fsnotify_mark *{match.group(2)}, struct file *f)'
+    c = c[:match.start()] + new_sig + c[match.end():]
+    c = '/* SUSFS_FDINFO_3ARGS_FIX */\n' + c
+    with open(path, 'w') as f: f.write(c)
+PYEOF
+
+# stat.c
+python3 - <<'PYEOF'
+import re, sys
+path = 'fs/stat.c'
+with open(path) as f: c = f.read()
+if 'SUSFS_STAT_DECLS' in c: sys.exit(0)
+includes = '\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#include <linux/susfs.h>\n#endif\n'
+m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m: c = c[:m[-1].end()] + includes + c[m[-1].end():]
+externs = '\n/* SUSFS_STAT_DECLS */\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\nextern bool susfs_is_current_app_uid(void);\nextern bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);\nextern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat, u32 result_mask);\n#endif\n'
+m2 = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m2: c = c[:m2[-1].end()] + externs + c[m2[-1].end():]
+defs = '\n#ifndef STATX_SUS_KSTAT\n#define STATX_SUS_KSTAT 0x80000000U\n#endif\n#ifndef STATX_SUS_KSTAT_FUSE\n#define STATX_SUS_KSTAT_FUSE 0x40000000U\n#endif\n'
+m3 = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m3: c = c[:m3[-1].end()] + defs + c[m3[-1].end():]
+with open(path, 'w') as f: f.write(c)
+PYEOF
+
 
 # ==================== 3. INTÉGRATION KernelSU-Next ====================
 echo ""
@@ -474,7 +699,29 @@ export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-@@SEG_CLANG@@
+# --- Compatibilité clang : le noyau peut passer des -Wno-... inconnus d'un clang ancien
+CLANG_MAJOR=$(clang --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
+echo "clang : $(command -v clang) -> $(readlink -f "$(command -v clang)")" | tee -a "$AUDIT"
+clang --version | head -2 | tee -a "$AUDIT"
+echo "clang version majeure : ${CLANG_MAJOR:-inconnue}" | tee -a "$AUDIT"
+CC_ARGS=""
+if [ "${FORCE_CLANG_WRAP:-1}" = "1" ] || [ "${CLANG_MAJOR:-99}" -lt 16 ]; then
+    cat > "$GITHUB_WORKSPACE/clang-wrap" <<'WRAPEOF'
+#!/bin/bash
+args=()
+for a in "$@"; do
+    case "$a" in
+        -Wno-cast-function-type-strict|-Wcast-function-type-strict) ;;
+        *) args+=("$a") ;;
+    esac
+done
+exec clang -Wno-unknown-warning-option "${args[@]}" -Wno-unknown-warning-option
+WRAPEOF
+    chmod +x "$GITHUB_WORKSPACE/clang-wrap"
+    CC_ARGS="CC=$GITHUB_WORKSPACE/clang-wrap"
+    echo "⚠️ clang < 16 : wrapper actif (flags inconnus ignorés)" | tee -a "$AUDIT"
+fi
+
 
 mkdir -p out
 make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
@@ -528,7 +775,75 @@ if ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
 fi
 
 # -----------------------------------------------------------------------------
-@@SEG_4C@@
+# 4c. Contrôle de fs/susfs.c (directives non fermées, fonctions "priority uid filter")
+#     SUSFS_AUTOREPAIR=0 pour ne rien réparer automatiquement.
+# -----------------------------------------------------------------------------
+{
+    echo ""
+    echo "=== CONTRÔLE fs/susfs.c ==="
+    [ -f fs/susfs.c ] && echo "fs/susfs.c APRÈS patch : $(wc -l < fs/susfs.c) lignes, sha256 $(sha256sum fs/susfs.c | cut -c1-16)" || echo "⚠️ fs/susfs.c absent"
+    grep -n "PRIORITY_UID_FILTER" fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h drivers/kernelsu/Kconfig 2>/dev/null | head -30 || true
+    grep -E "PRIORITY_UID_FILTER" out/.config || echo "PRIORITY_UID_FILTER absent de .config"
+    echo "--- 25 dernières lignes de fs/susfs.c"
+    tail -n 25 fs/susfs.c 2>/dev/null || true
+    echo "--- définitions / déclarations des fonctions priority"
+    grep -rn "susfs_parse_priority_app_strings\|susfs_set_priority_uid_filter" fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h drivers/kernelsu 2>/dev/null | head -20 || true
+    true
+} 2>&1 | tee -a "$AUDIT"
+
+PRIO_FLAG=""
+rm -f "$GITHUB_WORKSPACE/.susfs_prio_define"
+SUSFS_AUTOREPAIR="${SUSFS_AUTOREPAIR:-1}" SUSFS_PRIORITY_UID_FILTER="$SUSFS_PRIORITY_UID_FILTER" python3 - <<'PYEOF' 2>&1 | tee -a "$AUDIT"
+import os, re
+repair = os.environ.get('SUSFS_AUTOREPAIR', '1') == '1'
+prio_on = os.environ.get('SUSFS_PRIORITY_UID_FILTER', '1') == '1'
+p = 'fs/susfs.c'
+c = open(p).read()
+lines = c.split('\n')
+
+# a) équilibre des directives du préprocesseur
+stack, extra = [], 0
+for i, line in enumerate(lines, 1):
+    m = re.match(r'\s*#\s*(ifdef|ifndef|if|endif)\b', line)
+    if not m: continue
+    if m.group(1) == 'endif':
+        if stack: stack.pop()
+        else: extra += 1
+    else:
+        stack.append(i)
+print(f"  équilibre des directives : {len(stack)} non fermée(s) {stack}, {extra} #endif en trop")
+if stack and repair:
+    marker = '/* susfs avc log spoofing */'
+    opener = lines[stack[-1] - 1] if len(stack) == 1 else ''
+    if len(stack) == 1 and 'PRIORITY_UID_FILTER' in opener and marker in c:
+        # le bloc « priority uid filter » doit se terminer juste avant la suite du fichier
+        c = c.replace(marker, '#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n\n' + marker, 1)
+        print("  🔧 #endif inséré avant « susfs avc log spoofing » (fin du bloc priority uid filter)")
+    else:
+        c = c.rstrip('\n') + '\n' + '#endif /* SUSFS_AUTOREPAIR */\n' * len(stack)
+        print(f"  🔧 {len(stack)} #endif ajouté(s) en fin de fichier (position non vérifiée)")
+    open(p, 'w').write(c)
+
+# b) fonction « priority uid filter » : activée, ou remplacée par des stubs
+if prio_on:
+    open(os.path.join(os.environ.get('GITHUB_WORKSPACE', '.'), '.susfs_prio_define'), 'w').write('1')
+    print("  ✅ priority uid filter ACTIVÉ (-DCONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=1)")
+elif repair:
+    hdrs = [h for h in ('include/linux/susfs.h', 'include/linux/susfs_def.h') if os.path.exists(h)]
+    stubs = {
+        'susfs_set_priority_uid_filter': '#define susfs_set_priority_uid_filter(arg) ((void)(arg))',
+        'susfs_parse_priority_app_strings': '#define susfs_parse_priority_app_strings() do { } while (0)',
+    }
+    for name, stub in stubs.items():
+        for h in hdrs:
+            open(h, 'a').write(f"\n/* SUSFS_AUTOREPAIR : fonction désactivée, stub sans effet */\n#ifndef {name}\n{stub}\n#endif\n")
+    print("  ✅ priority uid filter DÉSACTIVÉ : stubs sans effet ajoutés aux headers")
+PYEOF
+if [ -f "$GITHUB_WORKSPACE/.susfs_prio_define" ]; then
+    PRIO_FLAG="-DCONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=1"
+fi
+echo "PRIO_FLAG='$PRIO_FLAG'" | tee -a "$AUDIT"
+
 
 # ==================== 6. PATCHS MOTOROLA ====================
 echo "=== Patch signatures + tactile ==="
