@@ -58,53 +58,108 @@ else
 fi
 git log --oneline -1 | tee -a "$AUDIT"
 
-# ==================== 2. SuSFS 2.3.0 : PATCH LOCAL ====================
+# ==================== 2. SuSFS 2.3.0 : PARTIE NOYAU ====================
 echo ""
-echo "=== Application du patch SuSFS 4.19 (local) ==="
+echo "=== Application du patch SuSFS 4.19 ==="
 
-# Utilisation du patch local situé dans le dossier patches/ du dépôt
 SUSFS_PATCH="$GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch"
 
 if [ ! -f "$SUSFS_PATCH" ]; then
     echo "❌ Patch local introuvable à : $SUSFS_PATCH"
-    echo "   Assure-toi que le fichier patches/susfs_patch_to_4.19.patch existe à la racine de ton dépôt."
     exit 1
 fi
 
-echo "  → Utilisation du patch local : $SUSFS_PATCH"
+# --- Nettoyage préalable : supprimer les fichiers SUSFS pour que le patch les crée proprement
+rm -f fs/susfs.c fs/susfs_glue.c include/linux/susfs.h include/linux/susfs_def.h 2>/dev/null || true
+sed -i '/susfs\.o/d' fs/Makefile 2>/dev/null || true
+sed -i '/susfs_glue\.o/d' fs/Makefile 2>/dev/null || true
 
+# --- Application du patch
 if patch -p1 --forward --dry-run --silent < "$SUSFS_PATCH" > /dev/null 2>&1; then
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1
-    echo "  ✅ patch SuSFS appliqué"
+    echo "  ✅ Patch SuSFS appliqué"
 else
     echo "  ⚠️ Patch partiellement rejeté — correction manuelle nécessaire"
     patch -p1 --forward < "$SUSFS_PATCH" > /tmp/susfs_patch.log 2>&1 || true
-    
-    # --- Résolution des hunks rejetés critiques ---
-    echo "  → Résolution des hunks rejetés dans fs/namespace.c, fs/super.c, fs/proc/task_mmu.c"
-    python3 - <<'PYEOF'
-import re, sys, os
+    echo "  → Hunks échoués :"
+    grep -E "FAILED at" /tmp/susfs_patch.log || true
+fi
 
-# 1. fs/namespace.c (includes + vfs_kern_mount)
+# --- Vérifier que les fichiers SUSFS ont bien été créés, sinon les extraire manuellement
+for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+    if [ ! -f "$f" ]; then
+        echo "  ⚠️ $f manquant, extraction manuelle depuis le patch..."
+        python3 - "$SUSFS_PATCH" "$f" <<'PYEOF'
+import re, sys, os
+patch_file, target = sys.argv[1], sys.argv[2]
+with open(patch_file) as f:
+    content = f.read()
+# Pattern pour les nouveaux fichiers
+pattern = r'diff --git a/' + re.escape(target) + r' b/' + re.escape(target) + r'.*?\n--- /dev/null\n\+\+\+ b/' + re.escape(target) + r'\n@@ -0,0 \+1,\d+ @@\n(.*?)(?=\ndiff --git|\Z)'
+match = re.search(pattern, content, re.DOTALL)
+if not match:
+    print(f"❌ Impossible d'extraire {target}")
+    sys.exit(1)
+lines = match.group(1).split('\n')
+cleaned = []
+for line in lines:
+    if line.startswith('+'):
+        cleaned.append(line[1:])
+    elif line.startswith(' '):
+        cleaned.append(line[1:])
+    elif line.startswith('-'):
+        continue
+    else:
+        cleaned.append(line)
+os.makedirs(os.path.dirname(target) or '.', exist_ok=True)
+with open(target, 'w') as f:
+    f.write('\n'.join(cleaned))
+print(f"  ✅ {target} extrait ({len(cleaned)} lignes)")
+PYEOF
+    fi
+done
+
+# --- Ajouter susfs.o au Makefile
+if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
+    echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+    echo "  ✅ susfs.o ajouté à fs/Makefile"
+fi
+
+# --- Correction manuelle de fs/namespace.c (includes + vfs_kern_mount)
+echo ""
+echo "=== Correction manuelle de fs/namespace.c ==="
+python3 - <<'PYEOF'
+import re, sys
 path = 'fs/namespace.c'
 with open(path) as f: c = f.read()
-if 'susfs_is_current_ksu_domain' not in c:
+
+# 1. Ajouter les includes si absents
+if 'susfs_def.h' not in c:
     anchor = '#include "internal.h"\n'
+    if anchor not in c:
+        print("  ❌ anchor introuvable dans fs/namespace.c")
+        sys.exit(1)
     bloc = '''
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
 #endif
+
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 extern bool susfs_is_current_ksu_domain(void);
 extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
 #define CL_COPY_MNT_NS BIT(25)
 #endif
+
 '''
     c = c.replace(anchor, anchor + bloc, 1)
+    print("  ✅ Includes ajoutés")
+
+# 2. Injecter le bloc vfs_kern_mount si absent
+if 'susfs_alloc_non_unshare_ksu_vfsmnt' not in c:
     pattern = r'(struct vfsmount \*vfs_kern_mount\([^)]*\)\s*\{.*?if \(!type\)\s*\n\s*return ERR_PTR\(-EINVAL\);\s*\n)'
     match = re.search(pattern, c, re.DOTALL)
     if match:
-        bloc2 = '''
+        bloc = '''
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {
 		if (susfs_is_current_ksu_domain()) {
@@ -113,8 +168,10 @@ extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
 		}
 	}
 #endif
+
 '''
-        c = c[:match.end()] + bloc2 + c[match.end():]
+        c = c[:match.end()] + bloc + c[match.end():]
+        # Ajouter le label avant if(!mnt)
         pattern2 = r'(mnt = alloc_vfsmnt\(name\);\s*\n)'
         match2 = re.search(pattern2, c)
         if match2:
@@ -122,53 +179,95 @@ extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 bypass_orig_flow:
 #endif
+
 '''
             c = c[:match2.end()] + label + c[match2.end():]
-    with open(path, 'w') as f: f.write(c)
-    print("  ✅ fs/namespace.c corrigé manuellement")
+        print("  ✅ vfs_kern_mount modifié")
+    else:
+        print("  ⚠️ vfs_kern_mount pattern introuvable")
+else:
+    print("  ↻ vfs_kern_mount déjà patché")
 
-# 2. fs/super.c (includes)
+with open(path, 'w') as f: f.write(c)
+PYEOF
+
+# --- Correction manuelle de fs/super.c
+echo ""
+echo "=== Correction manuelle de fs/super.c ==="
+python3 - <<'PYEOF'
+import sys
 path = 'fs/super.c'
 with open(path) as f: c = f.read()
 if 'susfs_def.h' not in c:
     anchor = '#include "internal.h"'
+    if anchor not in c:
+        print("  ❌ anchor introuvable dans fs/super.c")
+        sys.exit(1)
     bloc = '''
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
 #endif
+
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 extern bool susfs_is_current_ksu_domain(void);
 extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
 #endif
+
 '''
     c = c.replace(anchor, anchor + bloc, 1)
     with open(path, 'w') as f: f.write(c)
-    print("  ✅ fs/super.c corrigé manuellement")
+    print("  ✅ Includes ajoutés")
+else:
+    print("  ↻ fs/super.c déjà patché")
 PYEOF
-fi
 
-# Neutralisation de la fonction manquante si elle est référencée
-if [ -f "drivers/kernelsu/selinux/sepolicy.c" ]; then
-    if grep -q "susfs_add_sus_avd_allowed_by_type" drivers/kernelsu/selinux/sepolicy.c; then
-        echo "  → Neutralisation de susfs_add_sus_avd_allowed_by_type dans sepolicy.c"
-        python3 - <<'PYEOF'
-import re
-path = 'drivers/kernelsu/selinux/sepolicy.c'
+# --- Correction manuelle de fs/stat.c (includes + externs)
+echo ""
+echo "=== Correction manuelle de fs/stat.c ==="
+python3 - <<'PYEOF'
+import re, sys
+path = 'fs/stat.c'
 with open(path) as f: c = f.read()
-c = re.sub(r'extern\s+int\s+susfs_add_sus_avd_allowed_by_type\s*\([^;]*\);', '/* removed */', c)
-c = re.sub(r'susfs_add_sus_avd_allowed_by_type\s*\([^;]*\);', '/* removed */', c)
+
+if 'SUSFS_STAT_DECLS' in c:
+    print("  ↻ fs/stat.c déjà patché")
+    sys.exit(0)
+
+# 1. Ajouter les includes SUSFS
+includes = '''
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#include <linux/susfs.h>
+#endif
+
+'''
+m = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m:
+    c = c[:m[-1].end()] + includes + c[m[-1].end():]
+else:
+    c = includes + c
+
+# 2. Ajouter les externs manquants (susfs_is_current_app_uid est déjà dans susfs_def.h, mais on s'assure)
+externs = '''
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+extern bool susfs_is_current_app_uid(void);
+extern bool susfs_is_inode_sus_kstat(struct inode *inode, bool *out_is_fuse);
+extern void susfs_sus_kstat_spoof_generic_fillattr(struct inode *inode, struct kstat *stat, u32 result_mask);
+#endif
+#define SUSFS_STAT_DECLS
+
+'''
+m2 = list(re.finditer(r'#include\s+[<"][^>"]+[>"]\n', c))
+if m2:
+    c = c[:m2[-1].end()] + externs + c[m2[-1].end():]
+
 with open(path, 'w') as f: f.write(c)
-print("  ✅ sepolicy.c neutralisé")
+print("  ✅ Includes et externs ajoutés")
 PYEOF
-    fi
-fi
 
 find . -name "*.rej" -delete 2>/dev/null || true
-if ! grep -qE '^obj-\$\(CONFIG_KSU_SUSFS\)\s*\+=\s*susfs\.o' fs/Makefile; then
-    echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
-fi
 echo "✅ Patch SuSFS et corrections terminés"
-
+        
 # ==================== 3. INTÉGRATION KernelSU-Next ====================
 echo ""
 echo "=== Intégration KernelSU-Next ($KSU_REF) ==="
