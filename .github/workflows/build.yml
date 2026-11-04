@@ -17,5 +17,5 @@ jobs:
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: BakaSU-SUSFS-kiev
+          name: KernelSU-Next-SUSFS-kiev
           path: output/*
