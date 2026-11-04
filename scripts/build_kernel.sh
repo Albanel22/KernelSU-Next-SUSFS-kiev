@@ -2,29 +2,48 @@
 set -euo pipefail
 
 # =============================================================================
-# KernelSU-Next (legacy) + Hooks Manuels + Backport path_umount + ksud aligné
+# KernelSU-Next (legacy) + SuSFS 2.3.0 — PREMIER LANCEMENT (sonde + build au mieux)
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
-# v2.9 : driver épinglé sur le commit PARENT du commit preinit (UAPI 5, compatible
-#        avec le manager v3.4.2) + ksud depuis le tag v3.4.2 + garde-fou UAPI
-# v2.8 : ref KernelSU-Next épinglable (KSU_REF) + ksud compilé depuis le même
-#        checkout que le driver (fallback dev seulement si absent)
+#
+# Base : script v2.9 (KernelSU-Next legacy, hooks manuels) qui fonctionne SANS SuSFS
+#      + méthode du build SukiSU/SuSFS validé : sources épinglées, patch SuSFS local
+#        contrôlé (patches/), rattrapage des blocs rejetés, make -k, audits dans output/.
+#
+# Ce que ce run fait : applique la partie NOYAU de SuSFS 2.3.0 (patch de Jack), ajoute une
+# colle minimale côté driver, et liste tout ce qui manque. Le driver KernelSU-Next legacy
+# épinglé ne contient PAS la colle SuSFS 2.3.0 de SukiSU : des erreurs sont attendues.
+# Le script de hooks "inline" de Jack n'est PAS utilisé (hooks manuels v2.9 conservés).
 # =============================================================================
 
-# Branche ou tag de KernelSU-Next pour le DRIVER (et ksud si dispo localement).
-# Exemples : legacy (défaut) | v3.2.0-legacy (tag plus ancien, à vérifier)
+# ---- Driver KernelSU-Next (comme v2.9) ----
 KSU_REF="${KSU_REF:-legacy}"
-# Branche utilisée UNIQUEMENT si userspace/ksud n'existe pas dans le checkout
 KSUD_FALLBACK_REF="${KSUD_FALLBACK_REF:-v3.4.2}"
-# Commit du driver : parent (465490a) du commit 0b17f24 "Add module preinit" (UAPI 6)
-KSU_COMMIT="${KSU_COMMIT:-465490a}"
-# UAPI attendue par le manager installé (suffixe affiché, ex. 33355-5)
-KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"
+KSU_COMMIT="${KSU_COMMIT:-465490a}"           # vide = ne pas épingler
+KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"   # vide = ne pas vérifier l'UAPI
+# Dépôt alternatif pour le DRIVER (fork avec colle SuSFS). Vide = dépôt officiel + setup.sh.
+# Exemple : KSU_REPO_URL=https://github.com/sidex15/KernelSU-Next.git KSU_REF=<branche> KSU_COMMIT= KSU_EXPECTED_UAPI=
+KSU_REPO_URL="${KSU_REPO_URL:-}"
 
-echo "=== Build KernelSU-Next ($KSU_REF) pour noyau 4.19 ==="
+# ---- Source du noyau (même commit que les builds validés) ----
+KERNEL_PIN="${KERNEL_PIN:-9426323c2acd0865fd565a6dd8a9f39f831cbec3}"
+
+# ---- SuSFS ----
+SUSFS_SUS_MOUNT="${SUSFS_SUS_MOUNT:-1}"
+SUSFS_OPEN_REDIRECT="${SUSFS_OPEN_REDIRECT:-1}"
+SUSFS_PRIORITY_UID_FILTER="${SUSFS_PRIORITY_UID_FILTER:-1}"
+SUSFS_GLUE="${SUSFS_GLUE:-1}"                 # colle minimale côté driver (fs/susfs_glue.c)
+
+VER="ksun-susfs-probe1"
+
+echo "=== Build KernelSU-Next ($KSU_REF) + SuSFS 2.3.0 — $VER ==="
 df -h
 
 BOOT_GDRIVE_ID="1AhWuM99TFBEBLHHPzJSjbSh3rKx7UGis"
 DTBO_GDRIVE_ID="11451aa0CCzyVtNTYOK2n6oH6E0PT-2NX"
+
+mkdir -p "$GITHUB_WORKSPACE/output"
+AUDIT="$GITHUB_WORKSPACE/output/audit-${VER}.txt"
+: > "$AUDIT"
 
 sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
 sudo apt-get clean 2>/dev/null || true
@@ -32,21 +51,67 @@ sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.l
 sudo apt-get update
 sudo apt-get install -y bc bison build-essential ccache flex glibc-source libelf-dev libssl-dev \
   libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi clang llvm lld \
-  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio libclang-dev
+  device-tree-compiler zip unzip curl git python3 python3-pip mkbootimg cpio libclang-dev patch wget
 
 pip3 install --quiet gdown
 cd "$GITHUB_WORKSPACE"
 
-# ==================== 1. CLONAGE DU NOYAU ====================
-git clone https://github.com/LineageOS/android_kernel_motorola_sm8250.git -b lineage-23.2 --depth=1 kernel_sources
-cd kernel_sources
-git log --oneline -1
+# ==================== 0. SONDE : où trouver une colle SuSFS côté driver ? ====================
+{
+    echo ""
+    echo "=== SONDE : branches et tags des dépôts KernelSU-Next connus ==="
+    for url in "https://github.com/KernelSU-Next/KernelSU-Next.git" \
+               "https://github.com/sidex15/KernelSU-Next.git" \
+               "https://github.com/pershoot/KernelSU-Next.git"; do
+        echo "--- $url"
+        git ls-remote --heads --tags "$url" 2>&1 | awk '{print $2}' \
+            | sed 's#refs/heads/#branche : #; s#refs/tags/#tag : #; s#\^{}##' \
+            | grep -iE "susfs|legacy|n3x7g3n|4\.|dev" | sort -u | head -60 || true
+    done
+    true
+} 2>&1 | tee -a "$AUDIT"
 
-# ==================== 2. INTÉGRATION KernelSU-Next ====================
+# ==================== 1. CLONAGE DU NOYAU (source épinglée) ====================
+KERNEL_URL="https://github.com/LineageOS/android_kernel_motorola_sm8250.git"
+if [ -n "$KERNEL_PIN" ]; then
+    git clone --filter=blob:none --no-checkout -b lineage-23.2 "$KERNEL_URL" kernel_sources
+    cd kernel_sources
+    echo "Tête actuelle de lineage-23.2 : $(git log --oneline -1 origin/lineage-23.2)" | tee -a "$AUDIT"
+    if ! git checkout -q "$KERNEL_PIN" 2>/dev/null; then
+        echo "⚠️ $KERNEL_PIN absent de lineage-23.2, recherche dans les autres branches..." | tee -a "$AUDIT"
+        git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+        git checkout -q "$KERNEL_PIN" || { echo "❌ commit $KERNEL_PIN introuvable dans le dépôt"; exit 1; }
+    fi
+    echo "Source figée sur : $KERNEL_PIN" | tee -a "$AUDIT"
+else
+    git clone "$KERNEL_URL" -b lineage-23.2 --depth=1 kernel_sources
+    cd kernel_sources
+fi
+git log --oneline -1 | tee -a "$AUDIT"
+echo "SHA complet de la source : $(git rev-parse HEAD)" | tee -a "$AUDIT"
+
+# ==================== 2. SuSFS 2.3.0 : PARTIE NOYAU (patch de Jack, copie épinglée) ====================
+# Appliqué AVANT KernelSU-Next, sur un arbre vierge, comme dans le build SukiSU validé.
+@@SEG_PATCH@@
+
+# Corrections de compatibilité 4.19 (partie noyau uniquement)
+@@SEG_COMPAT@@
+
+# ==================== 3. INTÉGRATION KernelSU-Next ====================
+echo ""
 echo "=== Intégration KernelSU-Next ($KSU_REF) ==="
-rm -rf drivers/kernelsu KernelSU KernelSU-Next susfs4ksu 2>/dev/null || true
+rm -rf drivers/kernelsu KernelSU KernelSU-Next 2>/dev/null || true
 
-curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSU_REF"
+if [ -n "$KSU_REPO_URL" ]; then
+    echo "Dépôt personnalisé : $KSU_REPO_URL (réf $KSU_REF)" | tee -a "$AUDIT"
+    git clone "$KSU_REPO_URL" KernelSU-Next
+    git -C KernelSU-Next checkout "$KSU_REF"
+    ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+    grep -q "kernelsu" drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+    grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+else
+    curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSU_REF"
+fi
 
 if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU/kernel" ]; then
     echo "❌ Échec intégration KernelSU-Next"; exit 1
@@ -63,8 +128,8 @@ fi
 UAPI_FILE=$(find KernelSU-Next -path "*/uapi/supercall.h" -type f 2>/dev/null | head -1 || true)
 if [ -n "$UAPI_FILE" ]; then
     UAPI_FOUND=$(grep -E "^#define KERNEL_SU_UAPI_VERSION" "$UAPI_FILE" | awk '{print $3}' || true)
-    echo "UAPI du driver : ${UAPI_FOUND:-?}  (attendue : $KSU_EXPECTED_UAPI)  [$UAPI_FILE]"
-    if [ -n "$UAPI_FOUND" ] && [ "$UAPI_FOUND" != "$KSU_EXPECTED_UAPI" ]; then
+    echo "UAPI du driver : ${UAPI_FOUND:-?}  (attendue : ${KSU_EXPECTED_UAPI:-non vérifiée})  [$UAPI_FILE]"
+    if [ -n "$KSU_EXPECTED_UAPI" ] && [ -n "$UAPI_FOUND" ] && [ "$UAPI_FOUND" != "$KSU_EXPECTED_UAPI" ]; then
         echo "❌ UAPI du driver ($UAPI_FOUND) différente de celle attendue ($KSU_EXPECTED_UAPI) : abandon avant compilation"
         exit 1
     fi
@@ -82,7 +147,7 @@ for d in KernelSU-Next KernelSU; do
         echo -n "  commit   : "; git -C "$d" rev-parse HEAD 2>/dev/null || echo "?"
         echo -n "  branche  : "; git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?"
     fi
-done
+done 2>&1 | tee -a "$AUDIT"
 
 if [ -d "drivers/kernelsu" ]; then
     KSU_DIR="drivers/kernelsu"
@@ -100,7 +165,92 @@ for d in "$GITHUB_WORKSPACE/kernel_sources/KernelSU-Next" "$GITHUB_WORKSPACE/ker
 done
 echo "KSU_REPO_ROOT : ${KSU_REPO_ROOT:-introuvable}"
 
-# ==================== 2e. NEUTRALISATION CHECK.MK ====================
+# ==================== 3a. AUDIT DU DRIVER : que contient-il côté SuSFS ? ====================
+{
+    echo ""
+    echo "=== DRIVER : fichiers principaux ==="
+    find "$KSU_DIR/" -maxdepth 2 -type f \( -name "*.c" -o -name "*.h" -o -name "Kconfig*" -o -name "Makefile" -o -name "*.mk" \) 2>/dev/null | sort | head -80 || true
+    echo ""
+    echo "=== DRIVER : symboles Kconfig ==="
+    grep -rn "^config \|^menu \|^menuconfig " "$KSU_DIR/" --include="Kconfig*" 2>/dev/null | head -60 || true
+    echo ""
+    echo "=== DRIVER : références à SuSFS ==="
+    grep -rn -i "susfs" "$KSU_DIR/" --include="*.c" --include="*.h" --include="Kconfig*" --include="Makefile" --include="*.mk" 2>/dev/null | head -80 || true
+    echo ""
+    echo "=== DRIVER : fonctions clés (domaine ksu, SELinux, reboot, setuid) ==="
+    grep -rn "is_ksu_domain\|setup_selinux\|ksu_cred\|ksu_handle_sys_reboot\|KSU_INSTALL_MAGIC\|apply_kernelsu_rules\|ksu_handle_setuid\|ksu_handle_setresuid" "$KSU_DIR/" 2>/dev/null | head -60 || true
+    echo ""
+    echo "=== DRIVER : ksu_handle_sys_reboot (extrait) ==="
+    f=$(grep -rln "int ksu_handle_sys_reboot" "$KSU_DIR/" 2>/dev/null | head -1 || true)
+    if [ -n "$f" ]; then
+        n=$(grep -n "int ksu_handle_sys_reboot" "$f" | head -1 | cut -d: -f1)
+        echo "$f (ligne $n)"
+        sed -n "${n},$((n+70))p" "$f" || true
+    else
+        echo "introuvable"
+    fi
+    true
+} 2>&1 | tee -a "$AUDIT"
+
+# ==================== 3b. KCONFIG SuSFS INJECTÉ SI LE DRIVER N'EN A PAS ====================
+if ! grep -rqE "^config KSU_SUSFS$" "$KSU_DIR/" --include="Kconfig*" 2>/dev/null; then
+    echo "⚠️ Le driver n'a pas de symbole KSU_SUSFS : Kconfig injecté (fs/Kconfig.susfs_inject)" | tee -a "$AUDIT"
+    {
+        echo 'menu "KernelSU - SUSFS (injecté par le script)"'
+        echo 'config KSU_SUSFS'
+        printf '\tbool "KernelSU addon - SUSFS"\n\tdepends on KSU\n\tdefault n\n\n'
+        for o in SUS_PATH SUS_MOUNT SUS_KSTAT SPOOF_UNAME ENABLE_LOG HIDE_KSU_SUSFS_SYMBOLS \
+                 SPOOF_CMDLINE_OR_BOOTCONFIG OPEN_REDIRECT SUS_MAP; do
+            printf 'config KSU_SUSFS_%s\n\tbool "susfs %s"\n\tdepends on KSU_SUSFS\n\tdefault n\n\n' "$o" "$o"
+        done
+        echo 'endmenu'
+    } > fs/Kconfig.susfs_inject
+    grep -q "Kconfig.susfs_inject" fs/Kconfig || printf '\nsource "fs/Kconfig.susfs_inject"\n' >> fs/Kconfig
+fi
+
+# ==================== 3c. COLLE MINIMALE SuSFS <-> driver (fs/susfs_glue.c) ====================
+# Définitions FAIBLES : si le driver fournit déjà un symbole, c'est le sien qui gagne.
+if [ "$SUSFS_GLUE" = "1" ]; then
+    cat > fs/susfs_glue.c <<'GLUEEOF'
+/* Colle minimale SuSFS <-> KernelSU-Next (premier lancement).
+ * Ne câble PAS les commandes SuSFS du driver : elle satisfait seulement l'édition de liens. */
+#include <linux/types.h>
+#include <linux/cred.h>
+#include <linux/init.h>
+#include <linux/compiler.h>
+
+extern bool is_ksu_domain(void) __weak;
+extern void susfs_init(void);
+
+u32 susfs_ksu_sid __weak;
+u32 susfs_priv_app_sid __weak;
+struct cred *ksu_cred __weak;
+
+void __weak setup_selinux(const char *domain, struct cred *cred)
+{
+}
+
+bool __weak susfs_is_current_ksu_domain(void)
+{
+	if (is_ksu_domain)
+		return is_ksu_domain();
+	return false;
+}
+
+static int __init susfs_glue_init(void)
+{
+	susfs_init();
+	return 0;
+}
+late_initcall(susfs_glue_init);
+GLUEEOF
+    if ! grep -q "susfs_glue.o" fs/Makefile; then
+        echo 'obj-$(CONFIG_KSU_SUSFS) += susfs_glue.o' >> fs/Makefile
+    fi
+    echo "✅ colle minimale ajoutée (fs/susfs_glue.c)" | tee -a "$AUDIT"
+fi
+
+# ==================== 3d. NEUTRALISATION CHECK.MK ====================
 echo ""
 echo "=== Neutralisation check.mk ==="
 for pattern in susfs_compat.mk inline_hook_check.mk manual_hook_check.mk tracepoint_hook_check.mk kprobe_check.mk; do
@@ -112,7 +262,7 @@ for pattern in susfs_compat.mk inline_hook_check.mk manual_hook_check.mk tracepo
     fi
 done
 
-# ==================== 2b. NETTOYAGE UNICODE ====================
+# ==================== 3e. NETTOYAGE UNICODE ====================
 echo "=== Nettoyage Unicode ==="
 python3 << 'PYEOF'
 import os
@@ -140,7 +290,7 @@ for root, dirs, files in os.walk('.'):
 print(f"✅ {count} fichiers nettoyés")
 PYEOF
 
-# ==================== 2c. FIX symbol_resolver.h ====================
+# ==================== 3f. FIX symbol_resolver.h ====================
 echo "=== Fix symbol_resolver.h ==="
 for h in "$KSU_DIR/infra/symbol_resolver.h" "$KSU_DIR/kernel/infra/symbol_resolver.h"; do
     if [ -f "$h" ]; then
@@ -150,7 +300,7 @@ for h in "$KSU_DIR/infra/symbol_resolver.h" "$KSU_DIR/kernel/infra/symbol_resolv
     fi
 done
 
-# ==================== 2d. STATIC EXPORTS SELINUX ====================
+# ==================== 3g. STATIC EXPORTS SELINUX ====================
 echo "=== Static exports SELinux ==="
 [ -f "security/selinux/selinuxfs.c" ] && {
     sed -i 's/^static ssize_t (\*write_op\[\])/ssize_t (*write_op[])/' security/selinux/selinuxfs.c
@@ -168,7 +318,7 @@ echo "=== Static exports SELinux ==="
     sed -i 's/^static struct security_operations selinux_ops/struct security_operations selinux_ops/' security/selinux/hooks.c
 }
 
-# ==================== 2e. FIX O_CLOEXEC ====================
+# ==================== 3h. FIX O_CLOEXEC ====================
 echo ""
 echo "=== Fix O_CLOEXEC dans TOUS les fichiers (détection Manager) ==="
 
@@ -190,9 +340,9 @@ if [ -n "$FILES_ANON_INODE" ]; then
     done
 fi
 
-# ==================== 3. PATCHS MANUELS KERNELSU-NEXT (CORRIGÉS) ====================
+# ==================== 4. PATCHS MANUELS KERNELSU-NEXT (hooks v2.9, inchangés) ====================
 echo ""
-echo "=== Application des 5 Patchs Manuels KernelSU-Next ==="
+echo "=== Application des Patchs Manuels KernelSU-Next ==="
 
 python3 << 'PYEOF'
 import re
@@ -317,61 +467,114 @@ else:
 
 PYEOF
 
-# ==================== 4. CONFIGURATION ====================
+# ==================== 5. CONFIGURATION ====================
 echo ""
-echo "=== Configuration (KernelSU-Next Manual Hook, sans SUSFS) ==="
+echo "=== Configuration (KernelSU-Next hooks manuels + SuSFS) ==="
 export ARCH=arm64; export SUBARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+@@SEG_CLANG@@
+
 mkdir -p out
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 vendor/lito-perf_defconfig
 
 {
   echo "CONFIG_KSU=y"
   echo "CONFIG_KSU_MANUAL_HOOK=y"
   echo "# CONFIG_KSU_WITH_KPROBES is not set"
-  echo "# CONFIG_KSU_SUSFS is not set"
   echo "# CONFIG_KSU_TAMPER_SYSCALL_TABLE is not set"
   echo "# CONFIG_KSU_TRACEPOINT_HOOK is not set"
+  echo "CONFIG_KSU_SUSFS=y"
+  echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+  echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+  echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+  echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+  echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+  echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+  echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+  if [ "$SUSFS_SUS_MOUNT" = "1" ]; then echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"; else echo "# CONFIG_KSU_SUSFS_SUS_MOUNT is not set"; fi
+  if [ "$SUSFS_OPEN_REDIRECT" = "1" ]; then echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"; else echo "# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set"; fi
   echo "CONFIG_KPROBES=y"
   echo "CONFIG_HAVE_KPROBES=y"
   echo "CONFIG_KRETPROBES=y"
+  echo "CONFIG_KALLSYMS=y"
+  echo "CONFIG_KALLSYMS_ALL=y"
   echo "CONFIG_SECCOMP=y"
   echo "CONFIG_SECCOMP_FILTER=y"
   echo "CONFIG_COMPAT=y"
   echo "CONFIG_COMPAT_32BIT_TIME=y"
+  echo "CONFIG_THREAD_INFO_IN_TASK=y"
 } >> out/.config
 
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -5
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 olddefconfig 2>&1 | tail -5
 
 echo "=== État final .config ==="
-grep -E "KSU_MANUAL_HOOK|KSU_SUSFS|KSU_WITH_KPROBES|KSU_TRACEPOINT|KSU_TAMPER|SECCOMP" out/.config | head -20 || true
+{
+    grep -E "KSU|SECCOMP" out/.config | head -40 || true
+    for o in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SUS_MAP KSU_SUSFS_SUS_MOUNT KSU_SUSFS_OPEN_REDIRECT; do
+        if grep -q "^CONFIG_${o}=y" out/.config; then echo "  ✅ CONFIG_${o} actif"; else echo "  ℹ️ CONFIG_${o} inactif ou inexistant"; fi
+    done
+    true
+} 2>&1 | tee -a "$AUDIT"
 
 if ! grep -q "^CONFIG_KSU=y" out/.config; then
     echo "❌ CONFIG_KSU non activé, abandon"
     exit 1
 fi
+if ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
+    echo "❌ CONFIG_KSU_SUSFS supprimé par olddefconfig : SuSFS ne serait pas compilé, abandon" | tee -a "$AUDIT"
+    exit 1
+fi
 
-# ==================== 5. PATCHS MOTOROLA ====================
+# -----------------------------------------------------------------------------
+@@SEG_4C@@
+
+# ==================== 6. PATCHS MOTOROLA ====================
 echo "=== Patch signatures + tactile ==="
 sed -i 's/if (!check_version(/if (0 \&\& !check_version(/g' kernel/module.c
 printf "\n/* --- Début Patch Tactile --- */\n#include <linux/notifier.h>\n#include <linux/module.h>\nstatic BLOCKING_NOTIFIER_HEAD(motorola_panel_notifier_list);\nint panel_register_notifier(struct notifier_block *nb) {\n    return blocking_notifier_chain_register(&motorola_panel_notifier_list, nb);\n}\nEXPORT_SYMBOL(panel_register_notifier);\nint panel_unregister_notifier(struct notifier_block *nb) {\n    return blocking_notifier_chain_unregister(&motorola_panel_notifier_list, nb);\n}\nEXPORT_SYMBOL(panel_unregister_notifier);\nvoid touch_set_state(int state) { return; }\nEXPORT_SYMBOL(touch_set_state);\n/* --- Fin Patch Tactile --- */\n" >> techpack/display/msm/msm_drv.c
 echo "✅ Patchs Motorola appliqués"
 
-# ==================== 6. COMPILATION KERNEL ====================
+# ==================== 7. COMPILATION KERNEL (make -k : toutes les erreurs d'un coup) ====================
 echo "=== Compilation du kernel ==="
-make O=out LLVM=1 CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 -j$(nproc) Image 2>&1 | tee build.log
-if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo "✅ Compilation réussie"
-    ls -lh out/arch/arm64/boot/
-    sha256sum out/arch/arm64/boot/Image | cut -d' ' -f1 > /tmp/kernel_compiled_hash.txt
-else
-    echo "❌ BUILD FAILED"
-    grep -iE "error:|fatal error:" build.log | head -30
+set +eo pipefail
+make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+  KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement $PRIO_FLAG" \
+  -k -j$(nproc) Image 2>&1 | tee build.log
+MAKE_RC=${PIPESTATUS[0]}
+set -eo pipefail
+
+if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
+    echo "❌ BUILD FAILED (rc=$MAKE_RC)"
+    grep -iE "error:|undefined symbol|undefined reference|fatal error:" build.log | head -30 || true
+    {
+        echo "=== ERREURS (rc=$MAKE_RC) ==="
+        grep -nE "error:|undefined symbol|undefined reference|fatal error:|\*\*\*" build.log | head -150 || true
+        echo ""
+        echo "=== SYMBOLES NON DÉFINIS (édition de liens) ==="
+        grep -oE "undefined reference to \`[^']+'" build.log | sort | uniq -c | sort -rn | head -60 || true
+        echo ""
+        echo "=== 150 DERNIÈRES LIGNES ==="
+        tail -n 150 build.log
+    } > "$GITHUB_WORKSPACE/output/build-errors.txt" 2>&1 || true
     exit 1
 fi
+echo "✅ Compilation réussie"
+ls -lh out/arch/arm64/boot/
+sha256sum out/arch/arm64/boot/Image | cut -d' ' -f1 > /tmp/kernel_compiled_hash.txt
+cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/output/Image-${VER}"
+cp out/System.map "$GITHUB_WORKSPACE/output/System.map-${VER}"
 
-# ==================== 7. COMPILATION KSUD (même checkout que le driver) ====================
+{
+    echo ""
+    echo "=== AUDIT SYMBOLES dans System.map ==="
+    echo "symboles susfs_ : $(grep -ci ' susfs_' out/System.map || true)"
+    grep -E " (susfs_init|susfs_is_current_ksu_domain|susfs_add_sus_path|susfs_set_priority_uid_filter|ksu_handle_sys_reboot|ksu_handle_execveat)$" out/System.map || echo "⚠️ symboles clés absents"
+    true
+} 2>&1 | tee -a "$AUDIT"
+
+# ==================== 8. COMPILATION KSUD (même checkout que le driver) ====================
 echo ""
 echo "=== Compilation ksud ==="
 cd "$GITHUB_WORKSPACE"
@@ -429,7 +632,7 @@ cp "$KSUD_BINARY" "$GITHUB_WORKSPACE/ksud"; chmod 755 "$GITHUB_WORKSPACE/ksud"
 echo "✅ ksud compilé ($KSUD_BINARY)"
 cd "$GITHUB_WORKSPACE"
 
-# ==================== 8. REPACK (MÉTHODE BACKSLASHXX) ====================
+# ==================== 9. REPACK (MÉTHODE BACKSLASHXX) ====================
 echo ""
 echo "=== Repack (méthode backslashxx : magiskboot cpio add) ==="
 
@@ -476,7 +679,7 @@ rm -f ./local_su_binary 2>/dev/null || true
 mv new-boot.img ../final_boot.img
 cd ..
 
-# ==================== 9. DIAGNOSTIC ====================
+# ==================== 10. DIAGNOSTIC ====================
 echo ""
 echo "=== DIAGNOSTIC ==="
 mkdir -p verify; cd verify
@@ -497,12 +700,11 @@ if [ -f "ramdisk.cpio" ]; then
 fi
 cd ..
 
-# ==================== 10. SORTIE ====================
-mkdir -p output
-cp final_boot.img output/KernelSU-Next-NoSUSFS-v2.9-boot.img
+# ==================== 11. SORTIE ====================
+cp final_boot.img "output/KernelSU-Next-SUSFS-${VER}-boot.img"
 cp dtbo-stock.img output/dtbo.img 2>/dev/null || true
 cp kernel_sources/build.log output/
 cp "$GITHUB_WORKSPACE/ksud" output/ksud 2>/dev/null || true
 echo ""
-echo "=== BUILD TERMINÉ v2.9 (KernelSU-Next $KSU_REF, sans SUSFS) ==="
+echo "=== BUILD TERMINÉ ${VER} (KernelSU-Next $KSU_REF + SuSFS 2.3.0) ==="
 ls -lh output/
