@@ -2,30 +2,27 @@
 set -euo pipefail
 
 # =============================================================================
-# KernelSU-Next (legacy, fork sidex15 « legacy-susfs-v2 ») + SuSFS 2.3.0 — ESSAI N°2
+# KernelSU-Next (legacy) + SuSFS 2.3.0 — PREMIER LANCEMENT (sonde + build au mieux)
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
 #
 # Base : script v2.9 (KernelSU-Next legacy, hooks manuels) qui fonctionne SANS SuSFS
 #      + méthode du build SukiSU/SuSFS validé : sources épinglées, patch SuSFS local
 #        contrôlé (patches/), rattrapage des blocs rejetés, make -k, audits dans output/.
 #
-# Essai n°1 (probe1) : driver officiel 465490a + partie noyau de SuSFS 2.3.0 -> boot OK, SuSFS
-# initialisé (« susfs is initialized! version: v2.3.0 »), mais aucune commande câblée.
-# Essai n°2 : le driver vient du fork de sidex15, branche/tag « legacy-susfs-v2 », qui contient
-# la colle SuSFS (commandes, setuid). Des différences d'API avec le SuSFS 2.3.0 de Jack sont
-# possibles : make -k les liste toutes dans output/build-errors.txt.
+# Ce que ce run fait : applique la partie NOYAU de SuSFS 2.3.0 (patch de Jack), ajoute une
+# colle minimale côté driver, et liste tout ce qui manque. Le driver KernelSU-Next legacy
+# épinglé ne contient PAS la colle SuSFS 2.3.0 de SukiSU : des erreurs sont attendues.
 # Le script de hooks "inline" de Jack n'est PAS utilisé (hooks manuels v2.9 conservés).
 # =============================================================================
 
 # ---- Driver KernelSU-Next (comme v2.9) ----
-KSU_REF="${KSU_REF:-v3.4.0-legacy-susfs-v2}"   # tag du fork ; essayer aussi la branche legacy-susfs-v2
+KSU_REF="${KSU_REF:-legacy}"
 KSUD_FALLBACK_REF="${KSUD_FALLBACK_REF:-v3.4.2}"
-KSU_COMMIT="${KSU_COMMIT:-}"                  # vide = ne pas épingler (le tag suffit)
-KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"   # UAPI attendue par le manager v3.4.2
-KSU_UAPI_STRICT="${KSU_UAPI_STRICT:-0}"       # 1 = abandonner si l'UAPI diffère (0 = avertir seulement)
+KSU_COMMIT="${KSU_COMMIT:-465490a}"           # vide = ne pas épingler
+KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"   # vide = ne pas vérifier l'UAPI
 # Dépôt alternatif pour le DRIVER (fork avec colle SuSFS). Vide = dépôt officiel + setup.sh.
 # Exemple : KSU_REPO_URL=https://github.com/sidex15/KernelSU-Next.git KSU_REF=<branche> KSU_COMMIT= KSU_EXPECTED_UAPI=
-KSU_REPO_URL="${KSU_REPO_URL:-https://github.com/sidex15/KernelSU-Next.git}"
+KSU_REPO_URL="${KSU_REPO_URL:-}"
 
 # ---- Source du noyau (même commit que les builds validés) ----
 KERNEL_PIN="${KERNEL_PIN:-9426323c2acd0865fd565a6dd8a9f39f831cbec3}"
@@ -34,9 +31,26 @@ KERNEL_PIN="${KERNEL_PIN:-9426323c2acd0865fd565a6dd8a9f39f831cbec3}"
 SUSFS_SUS_MOUNT="${SUSFS_SUS_MOUNT:-1}"
 SUSFS_OPEN_REDIRECT="${SUSFS_OPEN_REDIRECT:-1}"
 SUSFS_PRIORITY_UID_FILTER="${SUSFS_PRIORITY_UID_FILTER:-1}"
-SUSFS_GLUE="${SUSFS_GLUE:-1}"                 # colle minimale côté driver (fs/susfs_glue.c)
+SUSFS_GLUE="${SUSFS_GLUE:-1}"                 # colle côté driver (fs/susfs_glue.c)
+SUSFS_DISPATCH="${SUSFS_DISPATCH:-1}"         # câble les commandes ksu_susfs dans ksu_handle_sys_reboot du driver
+SUSFS_MARK="${SUSFS_MARK:-1}"                 # marque les apps « démontées » dans ksu_handle_setresuid du driver
 
-VER="ksun-susfs-probe2"
+# ---- Mode du driver ----
+#   official (défaut) : driver officiel épinglé (UAPI 5) + colle de ce script (aiguillage reboot + marquage)
+#   fork              : fork de sidex15 (tag v3.4.0-legacy-susfs-v2) qui apporte sa propre colle SuSFS :
+#                       on désactive l'aiguillage et le marquage de ce script pour éviter un double câblage.
+#                       Lancer avec KSUN_MODE=fork (variable d'environnement du workflow) ou changer la valeur ci-dessous.
+KSUN_MODE="${KSUN_MODE:-official}"
+if [ "$KSUN_MODE" = "fork" ]; then
+    KSU_REPO_URL="${KSU_REPO_URL:-https://github.com/sidex15/KernelSU-Next.git}"
+    KSU_REF="${KSU_REF_FORK:-v3.4.0-legacy-susfs-v2}"
+    KSU_COMMIT=""
+    KSU_EXPECTED_UAPI=""
+    SUSFS_DISPATCH=0
+    SUSFS_MARK=0
+fi
+
+VER="ksun-susfs-probe2-${KSUN_MODE}"
 
 echo "=== Build KernelSU-Next ($KSU_REF) + SuSFS 2.3.0 — $VER ==="
 df -h
@@ -356,12 +370,10 @@ fi
 UAPI_FILE=$(find KernelSU-Next -path "*/uapi/supercall.h" -type f 2>/dev/null | head -1 || true)
 if [ -n "$UAPI_FILE" ]; then
     UAPI_FOUND=$(grep -E "^#define KERNEL_SU_UAPI_VERSION" "$UAPI_FILE" | awk '{print $3}' || true)
-    echo "UAPI du driver : ${UAPI_FOUND:-?}  (attendue : ${KSU_EXPECTED_UAPI:-non vérifiée})  [$UAPI_FILE]" | tee -a "$AUDIT"
+    echo "UAPI du driver : ${UAPI_FOUND:-?}  (attendue : ${KSU_EXPECTED_UAPI:-non vérifiée})  [$UAPI_FILE]"
     if [ -n "$KSU_EXPECTED_UAPI" ] && [ -n "$UAPI_FOUND" ] && [ "$UAPI_FOUND" != "$KSU_EXPECTED_UAPI" ]; then
-        echo "⚠️ UAPI du driver ($UAPI_FOUND) différente de celle attendue ($KSU_EXPECTED_UAPI) : le manager v3.4.2 risque de refuser ce driver" | tee -a "$AUDIT"
-        if [ "$KSU_UAPI_STRICT" = "1" ]; then
-            echo "❌ abandon avant compilation (KSU_UAPI_STRICT=1)"; exit 1
-        fi
+        echo "❌ UAPI du driver ($UAPI_FOUND) différente de celle attendue ($KSU_EXPECTED_UAPI) : abandon avant compilation"
+        exit 1
     fi
 else
     echo "⚠️  uapi/supercall.h introuvable, UAPI non vérifiée"
@@ -405,13 +417,22 @@ echo "KSU_REPO_ROOT : ${KSU_REPO_ROOT:-introuvable}"
     grep -rn "^config \|^menu \|^menuconfig " "$KSU_DIR/" --include="Kconfig*" 2>/dev/null | head -60 || true
     echo ""
     echo "=== DRIVER : références à SuSFS ==="
-    grep -rn -i "susfs" "$KSU_DIR/" --include="*.c" --include="*.h" --include="Kconfig*" --include="Makefile" --include="Kbuild" --include="*.mk" 2>/dev/null | head -150 || true
-    echo ""
-    echo "=== DRIVER : commandes et fonctions SuSFS appelées ==="
-    grep -rhoE "susfs_[a-z_0-9]+|CMD_SUSFS_[A-Z_0-9]+" "$KSU_DIR/" --include="*.c" --include="*.h" 2>/dev/null | sort | uniq -c | sort -rn | head -80 || true
+    grep -rn -i "susfs" "$KSU_DIR/" --include="*.c" --include="*.h" --include="Kconfig*" --include="Makefile" --include="*.mk" 2>/dev/null | head -80 || true
     echo ""
     echo "=== DRIVER : fonctions clés (domaine ksu, SELinux, reboot, setuid) ==="
     grep -rn "is_ksu_domain\|setup_selinux\|ksu_cred\|ksu_handle_sys_reboot\|KSU_INSTALL_MAGIC\|apply_kernelsu_rules\|ksu_handle_setuid\|ksu_handle_setresuid" "$KSU_DIR/" 2>/dev/null | head -60 || true
+    echo ""
+    echo "=== DRIVER : fonctions de décision (allowlist / umount / manager) ==="
+    grep -rn "ksu_is_allow_uid_for_current\|ksu_uid_should_umount\|ksu_get_manager_appid\|allowed_for_su" "$KSU_DIR/" 2>/dev/null | head -40 || true
+    echo ""
+    echo "=== DRIVER : hook/setuid_hook.c ==="
+    cat "$KSU_DIR/hook/setuid_hook.c" 2>/dev/null | head -220 || true
+    echo ""
+    echo "=== DRIVER : feature/kernel_umount.c (début) ==="
+    sed -n '1,150p' "$KSU_DIR/feature/kernel_umount.c" 2>/dev/null || true
+    echo ""
+    echo "=== DRIVER : hook/lsm_hooks.c (90-125) ==="
+    sed -n '90,125p' "$KSU_DIR/hook/lsm_hooks.c" 2>/dev/null || true
     echo ""
     echo "=== DRIVER : ksu_handle_sys_reboot (extrait) ==="
     f=$(grep -rln "int ksu_handle_sys_reboot" "$KSU_DIR/" 2>/dev/null | head -1 || true)
@@ -445,15 +466,20 @@ fi
 # Définitions FAIBLES : si le driver fournit déjà un symbole, c'est le sien qui gagne.
 if [ "$SUSFS_GLUE" = "1" ]; then
     cat > fs/susfs_glue.c <<'GLUEEOF'
-/* Colle minimale SuSFS <-> KernelSU-Next (premier lancement).
- * Ne câble PAS les commandes SuSFS du driver : elle satisfait seulement l'édition de liens. */
+/* Colle SuSFS 2.3.0 <-> KernelSU-Next legacy.
+ *  1) symboles manquants : définitions FAIBLES (le driver gagne s'il fournit les siens)
+ *  2) aiguillage des commandes de l'outil ksu_susfs (reboot + SUSFS_MAGIC)
+ *  3) marquage des processus d'applications comme « démontés »
+ */
 #include <linux/types.h>
 #include <linux/cred.h>
+#include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/compiler.h>
+#include <linux/uaccess.h>
+#include <linux/susfs.h>
 
 extern bool is_ksu_domain(void) __weak;
-extern void susfs_init(void);
 
 u32 susfs_ksu_sid __weak;
 u32 susfs_priv_app_sid __weak;
@@ -470,6 +496,115 @@ bool __weak susfs_is_current_ksu_domain(void)
 	return false;
 }
 
+/* Valeurs de repli si le driver n'a pas ces fonctions (sinon les siennes sont utilisées) */
+bool __weak ksu_is_allow_uid_for_current(uid_t uid)
+{
+	return false;
+}
+
+bool __weak ksu_uid_should_umount(uid_t uid)
+{
+	return true;
+}
+
+int __weak ksu_get_manager_appid(void)
+{
+	return -1;
+}
+
+/* Marque l'application qui vient d'être créée par zygote comme « démontée ». */
+void susfs_glue_mark_umounted(uid_t old_uid, uid_t new_uid)
+{
+	uid_t appid = new_uid % 100000;
+
+	if (appid < 10000 || (old_uid % 100000) >= 10000)
+		return;
+	if ((int)appid == ksu_get_manager_appid())
+		return;
+	if (ksu_is_allow_uid_for_current(new_uid))
+		return;
+	if (!ksu_uid_should_umount(new_uid))
+		return;
+	susfs_set_current_proc_umounted();
+}
+
+/* Appelée depuis ksu_handle_sys_reboot() quand magic2 == SUSFS_MAGIC (réservé à root). */
+int susfs_glue_dispatch(unsigned int cmd, void __user **arg)
+{
+	if (current_uid().val != 0)
+		return 0;
+
+	switch (cmd) {
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+	case CMD_SUSFS_ADD_SUS_PATH:
+		susfs_add_sus_path(arg);
+		break;
+	case CMD_SUSFS_ADD_SUS_PATH_LOOP:
+		susfs_add_sus_path_loop(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	case CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS:
+		susfs_set_hide_sus_mnts_for_non_su_procs(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	case CMD_SUSFS_ADD_SUS_KSTAT:
+	case CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY:
+		susfs_add_sus_kstat(arg);
+		break;
+	case CMD_SUSFS_UPDATE_SUS_KSTAT:
+		susfs_update_sus_kstat(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+	case CMD_SUSFS_SET_UNAME:
+		susfs_set_uname(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+	case CMD_SUSFS_ENABLE_LOG:
+		susfs_enable_log(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+	case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG:
+		susfs_set_cmdline_or_bootconfig(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	case CMD_SUSFS_ADD_OPEN_REDIRECT:
+		susfs_add_open_redirect(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	case CMD_SUSFS_ADD_SUS_MAP:
+		susfs_add_sus_map(arg);
+		break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+	case CMD_SUSFS_SET_PRIORITY_UID_FILTER:
+		susfs_set_priority_uid_filter(arg);
+		break;
+#endif
+	case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
+		susfs_set_avc_log_spoofing(arg);
+		break;
+	case CMD_SUSFS_SHOW_ENABLED_FEATURES:
+		susfs_get_enabled_features(arg);
+		break;
+	case CMD_SUSFS_SHOW_VARIANT:
+		susfs_show_variant(arg);
+		break;
+	case CMD_SUSFS_SHOW_VERSION:
+		susfs_show_version(arg);
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
 static int __init susfs_glue_init(void)
 {
 	susfs_init();
@@ -482,6 +617,61 @@ GLUEEOF
     fi
     echo "✅ colle minimale ajoutée (fs/susfs_glue.c)" | tee -a "$AUDIT"
 fi
+
+# ==================== 3c'. CÂBLAGE DANS LE DRIVER (reboot + setresuid) ====================
+SUSFS_DISPATCH="$SUSFS_DISPATCH" SUSFS_MARK="$SUSFS_MARK" KSU_DIR="$KSU_DIR" python3 - <<'PYEOF' 2>&1 | tee -a "$AUDIT"
+import os, re
+
+def find(name):
+    for root, dirs, files in os.walk(os.environ['KSU_DIR'] + '/'):
+        if name in files:
+            return os.path.join(root, name)
+    return None
+
+# a) aiguillage des commandes SuSFS dans ksu_handle_sys_reboot
+if os.environ.get('SUSFS_DISPATCH', '1') == '1':
+    p = find('supercall.c')
+    if p:
+        c = open(p).read()
+        if 'SUSFS_DISPATCH' in c:
+            print("  ↻ aiguillage SuSFS déjà présent")
+        else:
+            pat = r'(int\s+ksu_handle_sys_reboot\s*\([^)]*\)\s*\{\s*if\s*\(\s*magic1\s*!=\s*KSU_INSTALL_MAGIC1\s*\)\s*return\s+0;\s*)'
+            m = re.search(pat, c)
+            if m:
+                ins = ('\n#ifdef CONFIG_KSU_SUSFS\n\t/* SUSFS_DISPATCH */\n'
+                       '\tif ((unsigned int)magic2 == 0xFAFAFAFAU) {\n'
+                       '\t\textern int susfs_glue_dispatch(unsigned int cmd, void __user **arg);\n'
+                       '\t\treturn susfs_glue_dispatch(cmd, arg);\n\t}\n#endif\n')
+                c = c[:m.end()] + ins + c[m.end():]
+                open(p, 'w').write(c)
+                print(f"  ✅ aiguillage SuSFS injecté dans {p}")
+            else:
+                print(f"  ⚠️ ksu_handle_sys_reboot : motif introuvable dans {p}")
+    else:
+        print("  ⚠️ supercall.c introuvable")
+
+# b) marquage des applications « démontées » dans ksu_handle_setresuid
+if os.environ.get('SUSFS_MARK', '1') == '1':
+    p = find('setuid_hook.c')
+    if p:
+        c = open(p).read()
+        if 'SUSFS_MARK' in c:
+            print("  ↻ marquage SuSFS déjà présent")
+        else:
+            pat = r'(int\s+ksu_handle_setresuid\s*\(\s*uid_t\s+old_uid\s*,\s*uid_t\s+new_uid\s*\)\s*\{)'
+            m = re.search(pat, c)
+            if m:
+                decl = '#ifdef CONFIG_KSU_SUSFS\nextern void susfs_glue_mark_umounted(uid_t old_uid, uid_t new_uid);\n#endif\n\n'
+                call = '\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_glue_mark_umounted(old_uid, new_uid); /* SUSFS_MARK */\n#endif'
+                c = c[:m.start()] + decl + m.group(1) + call + c[m.end():]
+                open(p, 'w').write(c)
+                print(f"  ✅ marquage SuSFS injecté dans {p}")
+            else:
+                print(f"  ⚠️ ksu_handle_setresuid : motif introuvable dans {p}")
+    else:
+        print("  ⚠️ setuid_hook.c introuvable")
+PYEOF
 
 # ==================== 3d. NEUTRALISATION CHECK.MK ====================
 echo ""
@@ -893,7 +1083,7 @@ cp out/System.map "$GITHUB_WORKSPACE/output/System.map-${VER}"
     echo ""
     echo "=== AUDIT SYMBOLES dans System.map ==="
     echo "symboles susfs_ : $(grep -ci ' susfs_' out/System.map || true)"
-    grep -E " (susfs_init|susfs_is_current_ksu_domain|susfs_add_sus_path|susfs_set_priority_uid_filter|ksu_handle_sys_reboot|ksu_handle_execveat)$" out/System.map || echo "⚠️ symboles clés absents"
+    grep -E " (susfs_init|susfs_is_current_ksu_domain|susfs_add_sus_path|susfs_set_priority_uid_filter|susfs_glue_dispatch|susfs_glue_mark_umounted|ksu_handle_sys_reboot|ksu_handle_execveat)$" out/System.map || echo "⚠️ symboles clés absents"
     true
 } 2>&1 | tee -a "$AUDIT"
 
