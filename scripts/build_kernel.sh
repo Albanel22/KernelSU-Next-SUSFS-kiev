@@ -2,27 +2,30 @@
 set -euo pipefail
 
 # =============================================================================
-# KernelSU-Next (legacy) + SuSFS 2.3.0 — PREMIER LANCEMENT (sonde + build au mieux)
+# KernelSU-Next (legacy, fork sidex15 « legacy-susfs-v2 ») + SuSFS 2.3.0 — ESSAI N°2
 # Noyau 4.19 - Motorola One 5G Ace (kiev)
 #
 # Base : script v2.9 (KernelSU-Next legacy, hooks manuels) qui fonctionne SANS SuSFS
 #      + méthode du build SukiSU/SuSFS validé : sources épinglées, patch SuSFS local
 #        contrôlé (patches/), rattrapage des blocs rejetés, make -k, audits dans output/.
 #
-# Ce que ce run fait : applique la partie NOYAU de SuSFS 2.3.0 (patch de Jack), ajoute une
-# colle minimale côté driver, et liste tout ce qui manque. Le driver KernelSU-Next legacy
-# épinglé ne contient PAS la colle SuSFS 2.3.0 de SukiSU : des erreurs sont attendues.
+# Essai n°1 (probe1) : driver officiel 465490a + partie noyau de SuSFS 2.3.0 -> boot OK, SuSFS
+# initialisé (« susfs is initialized! version: v2.3.0 »), mais aucune commande câblée.
+# Essai n°2 : le driver vient du fork de sidex15, branche/tag « legacy-susfs-v2 », qui contient
+# la colle SuSFS (commandes, setuid). Des différences d'API avec le SuSFS 2.3.0 de Jack sont
+# possibles : make -k les liste toutes dans output/build-errors.txt.
 # Le script de hooks "inline" de Jack n'est PAS utilisé (hooks manuels v2.9 conservés).
 # =============================================================================
 
 # ---- Driver KernelSU-Next (comme v2.9) ----
-KSU_REF="${KSU_REF:-legacy}"
+KSU_REF="${KSU_REF:-v3.4.0-legacy-susfs-v2}"   # tag du fork ; essayer aussi la branche legacy-susfs-v2
 KSUD_FALLBACK_REF="${KSUD_FALLBACK_REF:-v3.4.2}"
-KSU_COMMIT="${KSU_COMMIT:-465490a}"           # vide = ne pas épingler
-KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"   # vide = ne pas vérifier l'UAPI
+KSU_COMMIT="${KSU_COMMIT:-}"                  # vide = ne pas épingler (le tag suffit)
+KSU_EXPECTED_UAPI="${KSU_EXPECTED_UAPI:-5}"   # UAPI attendue par le manager v3.4.2
+KSU_UAPI_STRICT="${KSU_UAPI_STRICT:-0}"       # 1 = abandonner si l'UAPI diffère (0 = avertir seulement)
 # Dépôt alternatif pour le DRIVER (fork avec colle SuSFS). Vide = dépôt officiel + setup.sh.
 # Exemple : KSU_REPO_URL=https://github.com/sidex15/KernelSU-Next.git KSU_REF=<branche> KSU_COMMIT= KSU_EXPECTED_UAPI=
-KSU_REPO_URL="${KSU_REPO_URL:-}"
+KSU_REPO_URL="${KSU_REPO_URL:-https://github.com/sidex15/KernelSU-Next.git}"
 
 # ---- Source du noyau (même commit que les builds validés) ----
 KERNEL_PIN="${KERNEL_PIN:-9426323c2acd0865fd565a6dd8a9f39f831cbec3}"
@@ -33,7 +36,7 @@ SUSFS_OPEN_REDIRECT="${SUSFS_OPEN_REDIRECT:-1}"
 SUSFS_PRIORITY_UID_FILTER="${SUSFS_PRIORITY_UID_FILTER:-1}"
 SUSFS_GLUE="${SUSFS_GLUE:-1}"                 # colle minimale côté driver (fs/susfs_glue.c)
 
-VER="ksun-susfs-probe1"
+VER="ksun-susfs-probe2"
 
 echo "=== Build KernelSU-Next ($KSU_REF) + SuSFS 2.3.0 — $VER ==="
 df -h
@@ -353,10 +356,12 @@ fi
 UAPI_FILE=$(find KernelSU-Next -path "*/uapi/supercall.h" -type f 2>/dev/null | head -1 || true)
 if [ -n "$UAPI_FILE" ]; then
     UAPI_FOUND=$(grep -E "^#define KERNEL_SU_UAPI_VERSION" "$UAPI_FILE" | awk '{print $3}' || true)
-    echo "UAPI du driver : ${UAPI_FOUND:-?}  (attendue : ${KSU_EXPECTED_UAPI:-non vérifiée})  [$UAPI_FILE]"
+    echo "UAPI du driver : ${UAPI_FOUND:-?}  (attendue : ${KSU_EXPECTED_UAPI:-non vérifiée})  [$UAPI_FILE]" | tee -a "$AUDIT"
     if [ -n "$KSU_EXPECTED_UAPI" ] && [ -n "$UAPI_FOUND" ] && [ "$UAPI_FOUND" != "$KSU_EXPECTED_UAPI" ]; then
-        echo "❌ UAPI du driver ($UAPI_FOUND) différente de celle attendue ($KSU_EXPECTED_UAPI) : abandon avant compilation"
-        exit 1
+        echo "⚠️ UAPI du driver ($UAPI_FOUND) différente de celle attendue ($KSU_EXPECTED_UAPI) : le manager v3.4.2 risque de refuser ce driver" | tee -a "$AUDIT"
+        if [ "$KSU_UAPI_STRICT" = "1" ]; then
+            echo "❌ abandon avant compilation (KSU_UAPI_STRICT=1)"; exit 1
+        fi
     fi
 else
     echo "⚠️  uapi/supercall.h introuvable, UAPI non vérifiée"
@@ -400,7 +405,10 @@ echo "KSU_REPO_ROOT : ${KSU_REPO_ROOT:-introuvable}"
     grep -rn "^config \|^menu \|^menuconfig " "$KSU_DIR/" --include="Kconfig*" 2>/dev/null | head -60 || true
     echo ""
     echo "=== DRIVER : références à SuSFS ==="
-    grep -rn -i "susfs" "$KSU_DIR/" --include="*.c" --include="*.h" --include="Kconfig*" --include="Makefile" --include="*.mk" 2>/dev/null | head -80 || true
+    grep -rn -i "susfs" "$KSU_DIR/" --include="*.c" --include="*.h" --include="Kconfig*" --include="Makefile" --include="Kbuild" --include="*.mk" 2>/dev/null | head -150 || true
+    echo ""
+    echo "=== DRIVER : commandes et fonctions SuSFS appelées ==="
+    grep -rhoE "susfs_[a-z_0-9]+|CMD_SUSFS_[A-Z_0-9]+" "$KSU_DIR/" --include="*.c" --include="*.h" 2>/dev/null | sort | uniq -c | sort -rn | head -80 || true
     echo ""
     echo "=== DRIVER : fonctions clés (domaine ksu, SELinux, reboot, setuid) ==="
     grep -rn "is_ksu_domain\|setup_selinux\|ksu_cred\|ksu_handle_sys_reboot\|KSU_INSTALL_MAGIC\|apply_kernelsu_rules\|ksu_handle_setuid\|ksu_handle_setresuid" "$KSU_DIR/" 2>/dev/null | head -60 || true
