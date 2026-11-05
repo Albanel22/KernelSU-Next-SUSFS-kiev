@@ -40,7 +40,7 @@ SUSFS_MARK="${SUSFS_MARK:-1}"                 # marque les apps « démontées �
 #   fork              : fork de sidex15 (tag v3.4.0-legacy-susfs-v2) qui apporte sa propre colle SuSFS :
 #                       on désactive l'aiguillage et le marquage de ce script pour éviter un double câblage.
 #                       Lancer avec KSUN_MODE=fork (variable d'environnement du workflow) ou changer la valeur ci-dessous.
-KSUN_MODE="${KSUN_MODE:-official}"
+KSUN_MODE="${KSUN_MODE:-fork}"
 if [ "$KSUN_MODE" = "fork" ]; then
     KSU_REPO_URL="${KSU_REPO_URL:-https://github.com/sidex15/KernelSU-Next.git}"
     KSU_REF="${KSU_REF_FORK:-v3.4.0-legacy-susfs-v2}"
