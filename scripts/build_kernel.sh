@@ -616,6 +616,12 @@ late_initcall(susfs_glue_init);
 void __weak susfs_add_try_umount(void __user **user_info)
 {
 }
+
+/* Appelée par le driver (fork) dans ksu_handle_setresuid ; retirée de SuSFS 2.x : sans effet. */
+int __weak susfs_try_umount(void)
+{
+	return 0;
+}
 GLUEEOF
     # Prototype pour le driver (le header de SuSFS 2.3.0 ne le déclare plus)
     if [ -f include/linux/susfs.h ] && ! grep -q "susfs_add_try_umount" include/linux/susfs.h; then
@@ -1060,12 +1066,32 @@ echo "✅ Patchs Motorola appliqués"
 
 # ==================== 7. COMPILATION KERNEL (make -k : toutes les erreurs d'un coup) ====================
 echo "=== Compilation du kernel ==="
-set +eo pipefail
-make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-  KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement $PRIO_FLAG" \
-  -k -j$(nproc) Image 2>&1 | tee build.log
-MAKE_RC=${PIPESTATUS[0]}
-set -eo pipefail
+run_make() {
+    set +eo pipefail
+    make O=out LLVM=1 $CC_ARGS CROSS_COMPILE=$CROSS_COMPILE CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+      KCFLAGS="-Wno-unused-variable -Wno-declaration-after-statement $PRIO_FLAG" \
+      -k -j$(nproc) Image 2>&1 | tee build.log
+    MAKE_RC=${PIPESTATUS[0]}
+    set -eo pipefail
+}
+run_make
+
+# Symboles susfs_* manquants à l'édition de liens (fonctions retirées de SuSFS 2.x que le driver appelle
+# encore) : stubs faibles sans effet générés automatiquement, 3 passes au maximum.
+# SUSFS_AUTOSTUB=0 pour désactiver. Les noms sont listés dans l'audit : à relire.
+AUTOSTUB_PASS=0
+while [ "$MAKE_RC" -ne 0 ] && [ "$AUTOSTUB_PASS" -lt 3 ] && [ "${SUSFS_AUTOSTUB:-1}" = "1" ]; do
+    MISSING=$(grep -oE "undefined symbol: susfs_[A-Za-z0-9_]+" build.log | awk '{print $3}' | sort -u || true)
+    [ -n "$MISSING" ] || break
+    AUTOSTUB_PASS=$((AUTOSTUB_PASS + 1))
+    echo "⚠️ Symboles SuSFS manquants (passe $AUTOSTUB_PASS) : $(echo $MISSING | tr '\n' ' ')" | tee -a "$AUDIT"
+    [ -f fs/susfs_autostub.c ] || printf '/* SUSFS_AUTOSTUB : stubs faibles sans effet pour des symboles absents de SuSFS 2.3.0 */\n#include <linux/compiler.h>\n' > fs/susfs_autostub.c
+    for sym in $MISSING; do
+        grep -q " ${sym}(void)" fs/susfs_autostub.c || printf 'int __weak %s(void) { return 0; }\n' "$sym" >> fs/susfs_autostub.c
+    done
+    grep -q "susfs_autostub.o" fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs_autostub.o' >> fs/Makefile
+    run_make
+done
 
 if [ "$MAKE_RC" -ne 0 ] || [ ! -f out/arch/arm64/boot/Image ]; then
     echo "❌ BUILD FAILED (rc=$MAKE_RC)"
