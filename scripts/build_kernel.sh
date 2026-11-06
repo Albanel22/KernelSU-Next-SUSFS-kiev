@@ -611,7 +611,16 @@ static int __init susfs_glue_init(void)
 	return 0;
 }
 late_initcall(susfs_glue_init);
+
+/* Commandes dépréciées depuis SuSFS 2.x que le driver (fork) appelle encore : acceptées, sans effet. */
+void __weak susfs_add_try_umount(void __user **user_info)
+{
+}
 GLUEEOF
+    # Prototype pour le driver (le header de SuSFS 2.3.0 ne le déclare plus)
+    if [ -f include/linux/susfs.h ] && ! grep -q "susfs_add_try_umount" include/linux/susfs.h; then
+        printf '\n/* SUSFS_GLUE : commande dépréciée, définie (sans effet) dans fs/susfs_glue.c */\nvoid susfs_add_try_umount(void __user **user_info);\n' >> include/linux/susfs.h
+    fi
     if ! grep -q "susfs_glue.o" fs/Makefile; then
         echo 'obj-$(CONFIG_KSU_SUSFS) += susfs_glue.o' >> fs/Makefile
     fi
