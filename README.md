@@ -1,199 +1,339 @@
-# KernelSU-Next for Motorola One 5G Ace (kiev)
+<div align="center">
 
-Custom **4.19 kernel with KernelSU-Next root** for the **Motorola One 5G Ace (`kiev`, SM8250)** running **LineageOS 23.2 (Android 16)**, built entirely on GitHub Actions.
+# 🛡️ KernelSU-Next (legacy) + SuSFS 2.3.0
+### pour le noyau **4.19** (non-GKI) du **Motorola One 5G Ace** (`kiev`)
 
-![Device](https://img.shields.io/badge/device-Moto%20One%205G%20Ace%20(kiev)-blue)
-![Kernel](https://img.shields.io/badge/kernel-4.19.325-informational)
-![ROM](https://img.shields.io/badge/ROM-LineageOS%2023.2-brightgreen)
-![Root](https://img.shields.io/badge/root-KernelSU--Next%20(legacy)-orange)
-![Hooks](https://img.shields.io/badge/hooks-manual-lightgrey)
-![SuSFS](https://img.shields.io/badge/SuSFS-not%20included-red)
+*SuSFS n'est plus fourni pour les noyaux non-GKI : ce dépôt montre comment le brancher « à la main » sur KernelSU-Next, avec le script, les pièges rencontrés et les preuves de fonctionnement.*
+
+`KernelSU-Next v3.4.0-legacy (33314-5)` · `SuSFS v2.3.0 (NON-GKI)` · `Linux 4.19.325` · `LineageOS 23.2` · `Android 16`
+
+</div>
+
+---
+
+## 📖 Sommaire
+
+1. [Résultat](#-résultat)
+2. [Ce qui est vérifié, ce qui reste à valider](#-ce-qui-est-vérifié-ce-qui-reste-à-valider)
+3. [⚠️ À lire avant de flasher](#️-à-lire-avant-de-flasher)
+4. [Contenu de la release](#-contenu-de-la-release)
+5. [Installation](#-installation)
+6. [Utiliser SuSFS et le tester](#-utiliser-susfs-et-le-tester)
+7. [Compiler soi-même (GitHub Actions)](#-compiler-soi-même-github-actions)
+8. [Comment ça marche : la « colle » driver ↔ SuSFS](#-comment-ça-marche--la--colle--driver--susfs)
+9. [🧗 Les difficultés rencontrées](#-les-difficultés-rencontrées)
+10. [Limites connues](#-limites-connues)
+11. [🩺 Dépannage](#-dépannage)
+12. [Crédits](#-crédits)
+
+---
+
+## 🎯 Résultat
+
+Relevé dans le manager KernelSU-Next, sur l'appareil :
+
+| Élément | Valeur affichée |
+|---|---|
+| État | **En fonctionnement** (`BUILT-IN (GKI1)`) |
+| Version du driver | `v3.4.0-legacy (33314-5)` |
+| Version du manager | `v3.4.2-spoofed (33355-5)` |
+| Méthode d'intégration | `Manual` |
+| **SuSFS** | **`Supported | v2.3.0 (NON-GKI)`** |
+| Méta-module | `OverlayFS MetaModule 1.3.1` |
+| Zygisk | `Zygisk Next 1.5.2 (864-a4a72ce-release)` |
+| SELinux | `Strict` |
+| Seccomp status | `Disabled` (comportement attendu) |
+| Super-utilisateurs / Modules | 3 / 9 |
+
+<!-- Ajoute tes captures dans docs/ puis décommente : -->
+<!-- ![Accueil du manager](docs/ksun-accueil.png) -->
+<!-- ![Détails du manager](docs/ksun-details.png) -->
+
+Fonctions SuSFS compilées **et** confirmées par le noyau en fonctionnement (`ksu_susfs show enabled_features` et `ksud susfs features`) :
+
+```text
+CONFIG_KSU_SUSFS_SUS_PATH
+CONFIG_KSU_SUSFS_SUS_MOUNT
+CONFIG_KSU_SUSFS_SUS_KSTAT
+CONFIG_KSU_SUSFS_SPOOF_UNAME
+CONFIG_KSU_SUSFS_ENABLE_LOG
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+CONFIG_KSU_SUSFS_OPEN_REDIRECT
+CONFIG_KSU_SUSFS_SUS_MAP
+CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+```
+
+---
+
+## ✅ Ce qui est vérifié, ce qui reste à valider
+
+| Point | Statut | Preuve |
+|---|---|---|
+| SuSFS s'initialise au démarrage | ✅ | `dmesg` : `susfs is initialized! version: v2.3.0` à 0,79 s |
+| Les commandes arrivent jusqu'au noyau | ✅ | `ksu_susfs show version` → `v2.3.0` |
+| Les 10 options sont actives | ✅ | `ksu_susfs show enabled_features` |
+| Le journal SuSFS fonctionne | ✅ | `ksu_susfs enable_log 1` → `ret: 0` dans `dmesg` |
+| Tests d'intégrité / détection | ✅ *(à détailler)* | <!-- Indique ici les applications utilisées et les verdicts --> |
+| Masquage d'un chemin (`SUS_PATH`) vu par une application **sans root** | ⬜ à valider | voir [le test](#test-1--masquer-un-fichier) |
+| `SUS_MOUNT`, `OPEN_REDIRECT`, `SUS_KSTAT` en conditions réelles | ⬜ à valider | non testés individuellement |
+
+> [!NOTE]
+> Les verdicts Play Integrity dépendent surtout de ton module d'attestation (keybox, Tricky Store ou équivalent). SuSFS cache les traces de root (montages, chemins, `uname`, mappings) : ce sont les deux ensemble qui font passer les tests.
+
+---
+
+## ⚠️ À lire avant de flasher
 
 > [!WARNING]
-> Flashing a custom kernel can leave your device unbootable. Back up your stock `boot.img` and `dtbo.img` first, and only continue if you know how to recover with `fastboot`. You are responsible for your own device.
+> **Flasher un noyau personnalisé peut empêcher le téléphone de démarrer.** Tu agis sous ta seule responsabilité. Aucune garantie n'est donnée.
+
+- Le **bootloader doit être déverrouillé**.
+- **Garde le `boot.img` d'origine** de *ta* version de ROM pour revenir en arrière.
+- Cette image est construite pour **LineageOS 23.2, build du 20/09/2026** (noyau stock `4.19.325-cip136-st20-perf`). Sur un autre build, le risque de **kernel panic** augmente : la source du noyau et la ROM doivent dater du même moment.
+- Teste **d'abord sans écrire** avec `fastboot boot`.
+- Le bootloader peut refuser une image **plus ancienne** que celle déjà installée (anti-rollback).
 
 ---
 
-## Table of contents
+## 📦 Contenu de la release
 
-- [Highlights](#highlights)
-- [Status](#status)
-- [Version compatibility (read this first)](#version-compatibility-read-this-first)
-- [How it is built](#how-it-is-built)
-- [Build it yourself](#build-it-yourself)
-- [Flashing](#flashing)
-- [Verifying the install](#verifying-the-install)
-- [Troubleshooting](#troubleshooting)
-- [Not included](#not-included)
-- [Roadmap](#roadmap)
-- [Credits](#credits)
-- [License](#license)
+| Fichier | Rôle |
+|---|---|
+| `KernelSU-Next-SUSFS-<VER>-boot.img` | L'image à flasher : `boot.img` d'origine **repackée** avec le noyau, `ksud` et `su` |
+| `Image-<VER>` | Le noyau brut |
+| `System.map-<VER>` | Table des symboles (vérifier ce qui est compilé) |
+| `audit-<VER>.txt` | Rapport du build : sonde des branches, contenu du driver, config finale, symboles |
+| `ksud` | Le binaire `ksud` embarqué (compilé depuis le tag `v3.4.2`) |
+| `susfs_patch_to_4.19.patch` | La copie **exacte** du patch SuSFS utilisé (à garder dans `patches/`) |
+| `build_kernel.sh` | Le script de build complet |
+
+`<VER>` vaut `ksun-susfs-probe2-official` pour le mode officiel décrit ici.
 
 ---
 
-## Highlights
+## 🚀 Installation
 
-- **Root through KernelSU-Next**, built into the kernel (`legacy` branch, made for non-GKI kernels).
-- **Manual hooks**: no kprobes dependency, hooks applied to the kernel source by script.
-- **Touchscreen works** with the stock Motorola touch modules on LineageOS 2026-09-20.
-- **Reproducible**: the driver is pinned to an exact commit and the script aborts *before* compiling if the driver's UAPI version does not match the manager you intend to use.
-- **No manual repacking**: the workflow downloads your stock `boot.img`, swaps in the new kernel and injects `ksud` with `magiskboot`.
-
-## Status
-
-| Item | State |
-| --- | --- |
-| Boot on LineageOS 23.2 (build 2026-09-20) | Works |
-| Touchscreen | Works |
-| Manager detects the kernel (no warning banner) | Works |
-| Root grants / Superuser list | Works |
-| Modules (Zygisk Next, LSPosed, Play Integrity Fix, TEESimulator-RS, Specter, VBMeta Fixer, HMA-OSS, Auto Target) | Loaded and enabled in the manager |
-| SuSFS in the kernel | Not included |
-| Metamodule | Not installed (not needed for the modules above to show as enabled) |
-
-Tested with manager **v3.4.2 (spoofed variant)**, which shows the kernel as `v3.4.0-legacy (33314-5)`.
-
-## Version compatibility (read this first)
-
-The manager and the kernel driver talk through a versioned interface (**UAPI**). The number after the dash in the manager (for example `33314-5`) is that UAPI version. If the manager's UAPI is lower than the driver's, the manager shows a red banner and hides root management.
-
-| Component | Version | UAPI |
-| --- | --- | :---: |
-| Kernel driver | KernelSU-Next `legacy` at commit `465490a` | 5 |
-| `ksud` (userspace daemon) | KernelSU-Next tag `v3.4.2` | 5 |
-| Manager | v3.4.2 | 5 |
-| Kernel driver, `legacy` at `0b17f24` or later | adds module preinit | **6**, rejected by manager v3.4.2 |
-
-Why not just track `legacy`?
-
-- `legacy` moves fast. At `0b17f24` ("Add module preinit") the UAPI went from 5 to 6, and the manager stable release was still on 5.
-- The `legacy` branch only contains `kernel/` and `uapi/`. There is **no manager and no `ksud` source** in it, so both come from the main line at tag `v3.4.2`.
-- A `ksud` built from a different line than the driver can speak a different protocol, so this project builds it from the same release as the manager.
-
-When a manager with UAPI 6 is available and you want to move forward, change the three variables below together, not one at a time.
-
-## How it is built
-
-```mermaid
-flowchart LR
-    A[LineageOS kernel source<br/>lineage-23.2] --> B[Integrate KernelSU-Next<br/>legacy @ pinned commit]
-    B --> C{UAPI check}
-    C -- mismatch --> X[Abort before compiling]
-    C -- ok --> D[Manual hooks +<br/>path_umount backport]
-    D --> E[Config + compile Image]
-    E --> F[Build ksud<br/>tag v3.4.2]
-    F --> G[Repack stock boot.img<br/>with magiskboot]
-    G --> H[boot.img + dtbo.img<br/>artifacts]
-```
-
-What the script does, in short:
-
-1. Clones `LineageOS/android_kernel_motorola_sm8250` (`lineage-23.2`).
-2. Integrates KernelSU-Next with its `setup.sh`, then pins the driver to `KSU_COMMIT`.
-3. Reads `KERNEL_SU_UAPI_VERSION` from the pinned driver and stops if it differs from `KSU_EXPECTED_UAPI`.
-4. Applies manual hooks (`execveat`, `faccessat`, `read`, `stat`, `reboot`) and backports `path_umount` for 4.19.
-5. Enables `CONFIG_KSU` with `CONFIG_KSU_MANUAL_HOOK` and no SuSFS, and applies the Motorola touchscreen compatibility stub.
-6. Compiles the kernel `Image` with LLVM.
-7. Builds `ksud` for `aarch64-linux-android` with NDK r26d.
-8. Unpacks your stock `boot.img`, replaces the kernel, adds `ksud` and a `su` entry to the ramdisk, and repacks.
-9. Prints diagnostics: pinned driver commit, UAPI value, kernel hash check, `ksud` presence in the ramdisk.
-
-## Build it yourself
-
-1. Fork this repository (`https://github.com/<your-username>/KernelSU-Next-SUSFS-kiev`).
-2. Upload your **stock `boot.img` and `dtbo.img` from the exact LineageOS build installed on your phone**, then set `BOOT_GDRIVE_ID` and `DTBO_GDRIVE_ID` at the top of `build_ksun_legacy_v2.9.sh` to your own file IDs.
-3. Run the workflow from the **Actions** tab.
-4. Download the artifacts: `KernelSU-Next-NoSUSFS-v2.9-boot.img`, `dtbo.img`, `ksud` and `build.log`.
-
-### Configuration variables
-
-Set them as environment variables of the workflow step, or edit the defaults in the script.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `KSU_REF` | `legacy` | Branch or tag passed to KernelSU-Next's `setup.sh` |
-| `KSU_COMMIT` | `465490a` | Exact driver commit to check out after integration |
-| `KSU_EXPECTED_UAPI` | `5` | UAPI the manager supports; the build aborts if the driver differs |
-| `KSUD_FALLBACK_REF` | `v3.4.2` | Tag used to build `ksud` (the `legacy` branch has no userspace) |
-
-> [!IMPORTANT]
-> The kernel source date must match the ROM installed on the device. A kernel built from an older source than your ROM can panic at boot, and modules from a different build are rejected with `disagrees about version of symbol module_layout`.
-
-## Flashing
-
-> [!CAUTION]
-> Use a `boot.img` and `dtbo.img` taken from the **same ROM build** as the one installed. Images from an older ROM build may be rejected by the bootloader (rollback protection).
-
-1. Back up your current boot partition (or keep the stock `boot.img` from your ROM zip).
-2. Reboot to the bootloader and flash:
-
-   ```bash
-   adb reboot bootloader
-   fastboot flash boot KernelSU-Next-NoSUSFS-v2.9-boot.img
-   fastboot flash dtbo dtbo.img
-   fastboot reboot
-   ```
-
-3. Install the **KernelSU-Next manager v3.4.2** APK and keep it on that version while you use this driver.
-
-To go back to stock, flash your original `boot.img` and `dtbo.img` the same way.
-
-## Verifying the install
-
-Open the manager. A healthy install looks like this:
-
-- Home shows **"Working"** with a version such as `v3.4.0-legacy (33314-5)`.
-- The suffix after the dash equals the manager's own suffix (`-5`).
-- **Integration method** is `Manual`.
-- No red banner; the **Superuser** tab is available.
-
-From Termux you can also check root:
+### 1. Tester sans écrire
 
 ```bash
-su -c id
+adb reboot bootloader
+fastboot boot KernelSU-Next-SUSFS-<VER>-boot.img
 ```
 
-You should see `uid=0(root)`.
+### 2. Flasher définitivement
 
-## Troubleshooting
+```bash
+fastboot getvar current-slot                # si ton appareil est en A/B
+fastboot flash boot KernelSU-Next-SUSFS-<VER>-boot.img
+fastboot reboot
+```
 
-| Symptom | Likely cause | What to do |
-| --- | --- | --- |
-| Red banner: *"manager version 5 is too low … version 6 or higher"* | Driver is newer (UAPI 6) than the manager (UAPI 5) | Rebuild with `KSU_COMMIT=465490a`, or use a manager with UAPI 6 |
-| Superuser tab missing | Same mismatch, the manager refuses to manage root | Same as above |
-| No touchscreen | Kernel does not match the ROM build, or the touch stub was removed | Rebuild from the source matching your ROM date and keep the stub |
-| Bootloop or panic right after flashing | Wrong `boot.img` base or mismatched ROM build | Flash your stock `boot.img` back, then rebuild with the images of the installed ROM |
-| Build stops with "UAPI du driver … différente de celle attendue" | Pinned driver does not match `KSU_EXPECTED_UAPI` | Check the commit; this is the safeguard working as intended |
-| `userspace/ksud absent` warning in the log | Expected: `legacy` has no userspace | Nothing, `ksud` is built from the fallback tag |
-| SuSFS module says "Active" | Stale description from an earlier kernel | The kernel has no SuSFS, see below |
+### 3. Installer le bon manager
 
-## Not included
+> [!IMPORTANT]
+> Le driver est **épinglé sur un commit à protocole UAPI 5**. Utilise un manager de protocole 5 : **`v3.4.2-spoofed (33355-5)`** a été testé. Avec un driver plus récent (UAPI 6), le manager affiche *« manager version 5 is too low, upgrade to 6 or higher »* : c'est la raison de l'épinglage.
 
-- **SuSFS**: not compiled into the kernel. SuSFS modules for the manager will not hide anything without kernel support, even if their description says otherwise.
-- **Kernel-level hiding or spoofing features** beyond what KernelSU-Next provides.
-- **OTA survival**: after a LineageOS update, rebuild with the new ROM's images and source.
+- Désinstalle l'ancien manager avant d'installer celui-ci.
+- Un **méta-module** est nécessaire pour monter les modules (testé : *OverlayFS MetaModule 1.3.1*).
 
-## Roadmap
+### 4. Revenir en arrière
 
-Ideas, in the order they are likely to be tried. One feature per build, so a touchscreen regression can be traced to a single change.
-
-- [ ] **BBR** TCP congestion control (config only)
-- [ ] **Droidspaces** support (namespaces, cgroups and related options)
-- [ ] **ReKernel** (small source patch, useful with app freezers)
-- [ ] **Baseband-guard** (LSM, integration on 4.19 to be evaluated)
-- [ ] Move to a manager and driver pair on UAPI 6 once a matching manager is released
-
-## Credits
-
-- [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next) team and the upstream KernelSU project
-- [LineageOS](https://lineageos.org/) and its Motorola SM8250 kernel maintainers
-- [backslashxx](https://github.com/backslashxx) for the `magiskboot cpio` repack approach used here
-- [Magisk](https://github.com/topjohnwu/Magisk) for `magiskboot`
-
-## License
-
-The Linux kernel and the KernelSU-Next kernel module are licensed under **GPL-2.0**. Add a `LICENSE` file here for the build scripts and workflow of this repository.
+```bash
+fastboot flash boot boot-stock.img
+```
 
 ---
 
-*Not affiliated with Motorola, LineageOS or the KernelSU-Next project.*
+## 🧪 Utiliser SuSFS et le tester
+
+`ksud` sait parler à SuSFS (`ksud susfs …`). L'outil `ksu_susfs` est fourni par un module SuSFS 2.x (testé : *.BRENE - SuSFS*). Toutes ces commandes se lancent **en root** (`su`).
+
+```bash
+su -c "ksu_susfs show version"            # attendu : v2.3.0
+su -c "ksu_susfs show enabled_features"   # liste des options actives
+su -c "ksud susfs features"               # même liste via ksud
+su -c "ksu_susfs enable_log 1"            # active les logs ; lire avec : dmesg | grep -i susfs
+```
+
+### Test 1 : masquer un fichier
+
+> [!IMPORTANT]
+> **Les applications qui ont accès au root ne sont pas masquées**, par conception : SuSFS cache les traces aux applications *ordinaires*. Un test depuis Termux avec root accordé ne prouve donc rien. Le noyau ne marque comme « démontées » que les applications sans accès su, au moment de leur lancement.
+
+1. En root : `echo secret > /sdcard/Download/secret_test.txt` puis `ksu_susfs add_sus_path /sdcard/Download/secret_test.txt`.
+2. Dans `dmesg`, cherche `flagged AS_FLAGS_SUS_PATH on pathname` : le noyau a marqué le fichier.
+3. Ouvre une application **sans root** (un gestionnaire de fichiers) : le fichier doit avoir disparu du dossier.
+4. Dans `dmesg`, une ligne `hiding path with ino …` confirme le masquage.
+
+Si le fichier reste visible, vérifie dans le manager (onglet Superuser) que l'option de démontage des modules est active pour cette application.
+
+### Test 2 : le spoof d'`uname`
+
+```bash
+su -c "ksu_susfs set_uname 4.19.999-test '#1 SMP test'"
+uname -r                  # sans su : doit afficher la valeur spoofée
+cat /proc/version         # peut garder l'ancienne valeur
+```
+
+---
+
+## 🏗️ Compiler soi-même (GitHub Actions)
+
+### Prérequis
+
+1. Le `boot.img` **et** le `dtbo.img` d'origine de ta ROM (même date que celle installée) sur un lien Google Drive public. Renseigne leurs identifiants dans `BOOT_GDRIVE_ID` et `DTBO_GDRIVE_ID` en tête du script.
+2. Un dépôt avec le script dans `scripts/build_kernel.sh` et les copies exactes du patch dans `patches/` (voir plus bas).
+
+### Workflow d'exemple (à adapter)
+
+```yaml
+name: build-kernel
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: bash scripts/build_kernel.sh
+        env:
+          KSUN_MODE: official        # voir le tableau des variables
+
+      - uses: actions/upload-artifact@v4
+        if: always()                  # publie même si une étape échoue
+        with:
+          name: kernel-output
+          path: output/
+```
+
+> [!TIP]
+> `if: always()` permet de récupérer `audit-<VER>.txt` et `build-errors.txt` même quand le build échoue.
+
+### Les variables
+
+| Variable | Défaut | Effet |
+|---|---|---|
+| `KSUN_MODE` | `official` | `official` : driver officiel épinglé + colle de ce script. `fork` : fork de sidex15 (non validé, voir [limites](#-limites-connues)) |
+| `KSU_COMMIT` | `465490a` | Commit du driver (parent du commit « preinit » qui passe l'UAPI de 5 à 6) |
+| `KSU_EXPECTED_UAPI` | `5` | Le script s'arrête si le driver n'a pas cette UAPI. Vide = seulement afficher |
+| `KSUD_FALLBACK_REF` | `v3.4.2` | Tag utilisé pour `ksud` quand le commit épinglé n'a pas de dossier `userspace/ksud` |
+| `KERNEL_PIN` | `9426323c2acd…` | Fige la **source du noyau** (branche `lineage-23.2`) sur un commit précis |
+| `SUSFS_SUS_MOUNT`, `SUSFS_OPEN_REDIRECT`, `SUSFS_PRIORITY_UID_FILTER` | `1` | Active ces options. `0` pour les désactiver |
+| `SUSFS_GLUE` | `1` | Ajoute la colle minimale `fs/susfs_glue.c` |
+| `SUSFS_DISPATCH` | `1` | Câble les commandes `ksu_susfs` dans le driver |
+| `SUSFS_MARK` | `1` | Marque les applications « démontées » dans le driver |
+| `SUSFS_AUTOSTUB` | `1` | Génère des stubs pour des symboles `susfs_*` manquants à l'édition de liens |
+
+### Le dossier `patches/` (build reproductible)
+
+Mets-y la **copie exacte** de `susfs_patch_to_4.19.patch` (récupère-la dans les artefacts d'un build, ne la recopie pas à la main). Le script vérifie son intégrité (chaque bloc a la taille annoncée), affiche son `sha256`, puis l'applique à la place de la version de la branche `mainline`, qui change sans prévenir.
+
+---
+
+## 🔬 Comment ça marche : la « colle » driver ↔ SuSFS
+
+Le driver KernelSU-Next *legacy* ne contient **aucun code SuSFS**. Le noyau reçoit SuSFS 2.3.0 par un patch (le fichier `fs/susfs.c` est entièrement créé par lui), puis ce script ajoute les trois morceaux qui relient le driver à SuSFS :
+
+```mermaid
+flowchart TD
+    A["ksu_susfs add_sus_path … (root)"] --> B["syscall reboot(0xDEADBEEF, 0xFAFAFAFA, cmd, &info)"]
+    B --> C["hook reboot du noyau : ksu_handle_sys_reboot (driver)"]
+    C --> D{"magic2 = SUSFS_MAGIC et uid = 0 ?"}
+    D -- oui --> E["susfs_glue_dispatch (fs/susfs_glue.c)"]
+    E --> F["susfs_add_sus_path, susfs_add_sus_kstat, susfs_set_uname, …"]
+    D -- non --> G["chemin normal du driver (manager, ksud)"]
+```
+
+1. **Fichier `fs/susfs_glue.c`** : définitions *faibles* des symboles que SuSFS attend du driver (`setup_selinux`, `ksu_cred`, `susfs_ksu_sid`, `susfs_is_current_ksu_domain`…). Si le driver en fournit un, c'est le sien qui gagne. Il appelle aussi `susfs_init()` au démarrage.
+2. **Aiguillage des commandes** : un court bloc injecté dans `ksu_handle_sys_reboot` (`supercall/supercall.c`) reconnaît la magie SuSFS (`0xFAFAFAFA`), vérifie que l'appelant est root, et transmet à la colle.
+3. **Marquage des processus** : dans `ksu_handle_setresuid` (`hook/setuid_hook.c`), les applications sans accès su sont marquées « démontées » (`susfs_set_current_proc_umounted()`). Sans ce drapeau, `SUS_PATH`, `SUS_KSTAT` et `SUS_MOUNT` ne masquent rien.
+
+Les hooks du noyau restent ceux du script KernelSU-Next d'origine : **hooks manuels** (`execveat`, `faccessat`, `read`, `stat`, `reboot`) plus le *backport* de `path_umount`. Le script de hooks « inline » de Jack **n'est pas utilisé**.
+
+---
+
+## 🧗 Les difficultés rencontrées
+
+| Symptôme | Cause | Solution |
+|---|---|---|
+| Édition de liens : `susfs_is_current_ksu_domain`, `susfs_ksu_sid`, `susfs_priv_app_sid` non définis | Le driver legacy n'a aucun code SuSFS | Colle `fs/susfs_glue.c` à définitions faibles |
+| Le manager affiche *« manager version 5 is too low »* | Un commit récent du driver (« preinit ») fait passer l'UAPI de 5 à 6 | Épingler le driver sur le commit parent (`465490a`) et compiler `ksud` depuis le tag `v3.4.2` |
+| Le build compilait hier, plus aujourd'hui (`unknown warning option '-Wno-cast-function-type-strict'`) | La branche `lineage-23.2` a avancé ; le clang du runner est trop ancien | Épingler la source (`KERNEL_PIN`), garde-fou clang |
+| `fs/susfs.c` absent après le patch, ou bloc `#ifdef` jamais fermé | Copie du patch incomplète ; ancienne version du patch défectueuse | Copie exacte dans `patches/`, contrôle d'intégrité, correction du `#endif` |
+| Le driver n'a pas d'options `KSU_SUSFS_*` | Kconfig absent | Kconfig injecté par le script (`fs/Kconfig.susfs_inject`) |
+| `ksu_susfs` répond mais rien n'est câblé | Aucune commande SuSFS dans `ksu_handle_sys_reboot` | Aiguillage injecté (magie `0xFAFAFAFA`) |
+| Un fichier « masqué » reste visible depuis Termux | Termux a accès root : jamais masqué par conception | Tester avec une application sans root |
+| Variante fork (sidex15) : `susfs_add_try_umount` puis `susfs_try_umount` indéfinis | Fonctions retirées de SuSFS 2.x que le fork appelle encore | Stubs faibles sans effet, boucle d'auto-stub |
+
+### Ce qui a aidé
+
+- **Lire le vrai code du driver** (`audit-<VER>.txt`) avant de câbler quoi que ce soit : le script écrit lui-même ces informations.
+- **Tout épingler** : source du noyau, driver, patch SuSFS. Chaque entrée qui bouge peut casser un build qui marchait.
+- **`make -k`** et un fichier `build-errors.txt` : toutes les erreurs d'un coup au lieu d'une par exécution.
+- **La sonde de branches** (`git ls-remote`) pour repérer qu'un fork avait déjà une branche SuSFS.
+
+---
+
+## 🚧 Limites connues
+
+- **Masquage non validé de bout en bout** : `SUS_PATH`, `SUS_MOUNT`, `OPEN_REDIRECT` et `SUS_KSTAT` sont compilés et pilotables, mais seul l'état « actif » est démontré ici (voir le tableau de vérification).
+- **Marquage approximatif** : une application est marquée « démontée » quand elle n'a pas accès su ; ça suit la règle du driver sur les profils d'applications.
+- **Variante `fork`** : la branche `legacy-susfs-v2` de sidex15 compile, mais l'édition de liens a échoué sur `susfs_try_umount` ; le correctif (stub) est écrit mais **non testé sur l'appareil**.
+- **Dépendance à la ROM** : validé sur LineageOS 23.2 du **20/09/2026**.
+- **Version du noyau affichée** : le manager montre `4.19.325-g29562686`, différente du build sans SuSFS. Le noyau inclut le spoof d'`uname` de SuSFS : un module peut donc modifier la valeur affichée ; vérifie avec `cat /proc/version`.
+- **Pas de test automatisé** des hooks : seule la présence des symboles et le comportement observé sur l'appareil servent de preuve.
+
+---
+
+## 🩺 Dépannage
+
+<details>
+<summary><b>Le manager n'affiche pas « SuSFS version »</b></summary>
+
+- Vérifie que tu as flashé la bonne image (`dmesg | grep susfs` doit montrer `susfs is initialized`).
+- Si rien n'apparaît, le build n'a pas inclus la colle : relis `audit-<VER>.txt` (section `colle minimale ajoutée`).
+</details>
+
+<details>
+<summary><b>« manager version 5 is too low »</b></summary>
+
+Le driver n'est pas celui épinglé. Vérifie `KSU_COMMIT` et la ligne `UAPI du driver : 5` dans le log du build.
+</details>
+
+<details>
+<summary><b>Le build échoue</b></summary>
+
+1. `bash -n scripts/build_kernel.sh` : une ligne tronquée est la cause la plus fréquente.
+2. Télécharge `build-errors.txt` et `audit-<VER>.txt` (pense à `if: always()`).
+3. Vérifie la ligne `sha256 patch SuSFS` : elle doit être identique d'un build à l'autre.
+</details>
+
+<details>
+<summary><b>Le téléphone ne démarre plus</b></summary>
+
+Reflash le `boot.img` d'origine de ta ROM et vérifie que sa date correspond à celle de l'image.
+</details>
+
+---
+
+## 🙏 Crédits
+
+- **[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next)** et ses contributeurs (branche *legacy*)
+- **SuSFS** — simonpunk et contributeurs
+- **[JackA1ltman/NonGKI_Kernel_Build_2nd](https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd)** — patch SuSFS pour 4.19
+- **sidex15** — fork de KernelSU-Next avec branches SuSFS (variante explorée)
+- **[LineageOS](https://lineageos.org/)** — sources du noyau `android_kernel_motorola_sm8250`
+- **[Magisk](https://github.com/topjohnwu/Magisk)** — `magiskboot` pour le repack
+
+## 📜 Licence
+
+Le noyau Linux et le driver KernelSU-Next sont sous **GPL-2.0**. Le script et la documentation sont fournis **sans garantie**, à titre d'information.
+
+<div align="center">
+
+*Si ce dépôt t'a fait gagner du temps, laisse une ⭐ — et si tu valides le masquage de bout en bout, ouvre une issue pour partager ton résultat !*
+
+</div>
